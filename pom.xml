@@ -1,0 +1,295 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.2</version>
+        <relativePath/> <!-- lookup parent from repository -->
+    </parent>
+    <groupId>com.ilkeiapps.skyworx</groupId>
+    <artifactId>notulen-ai</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>notulen-ai</name>
+    <description>notulen-ai</description>
+    <url/>
+    <licenses>
+        <license/>
+    </licenses>
+    <developers>
+        <developer/>
+    </developers>
+    <scm>
+        <connection/>
+        <developerConnection/>
+        <tag/>
+        <url/>
+    </scm>
+    <properties>
+        <java.version>25</java.version>
+        <spring-ai.version>2.0.2</spring-ai.version>
+        <embabel-agent.version>1.5.4</embabel-agent.version>
+        <blaze-persistence.version>1.6.20</blaze-persistence.version>
+        <!-- Distinct from Spring Boot's managed `querydsl.version` (which pins the legacy com.querydsl BOM);
+             overriding that name breaks the BOM import, so the OpenFeign fork uses its own property. -->
+        <openfeign-querydsl.version>7.7</openfeign-querydsl.version>
+        <!-- In-house ilkeitool validation libraries -->
+        <ilkeitool.version>1.0.2</ilkeitool.version>
+        <ilkeitool-entity.version>1.0.2.1</ilkeitool-entity.version>
+        <!-- jjwt is not managed by the Spring Boot BOM; pin explicitly. -->
+        <jjwt-api.version>0.12.6</jjwt-api.version>
+        <!-- springdoc-openapi (Swagger UI); 3.x line targets Spring Boot 4. -->
+        <springdoc.version>3.2.0</springdoc.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-starter</artifactId>
+        </dependency>
+        <!-- OpenAI-compatible model provider: points Embabel at the self-hosted
+             sky-inference (qxotic.ai) endpoint, which speaks the OpenAI API. Without a
+             model-provider starter Embabel starts with zero models ("No models detected"). -->
+        <dependency>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-starter-openai-custom</artifactId>
+            <version>${embabel-agent.version}</version>
+        </dependency>
+
+        <!-- OpenAPI / Swagger UI (springdoc 3.x targets Spring Boot 4) -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
+        <!-- JWT (jjwt), Gson serializer -->
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-api</artifactId>
+            <version>${jjwt-api.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-impl</artifactId>
+            <version>${jjwt-api.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.jsonwebtoken</groupId>
+            <artifactId>jjwt-gson</artifactId>
+            <version>${jjwt-api.version}</version>
+        </dependency>
+
+        <!-- In-house validation: IlKeiValidator (POJO) + IlKeiEntityValidator (Blaze entity criteria) -->
+        <dependency>
+            <groupId>com.ilkeiapps</groupId>
+            <artifactId>ilkeitool</artifactId>
+            <version>${ilkeitool.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.ilkeiapps</groupId>
+            <artifactId>ilkeitool-entity-blazebit</artifactId>
+            <version>${ilkeitool-entity.version}</version>
+            <exclusions>
+                <!-- Pulls a Hibernate 6 Blaze integration whose Integrator references the
+                     removed org.hibernate.engine.spi.Mapping and clashes with Hibernate 7.4.
+                     Keep only the declared blaze-persistence-integration-hibernate-7.2. -->
+                <exclusion>
+                    <groupId>com.blazebit</groupId>
+                    <artifactId>blaze-persistence-integration-hibernate-6.2</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>com.blazebit</groupId>
+                    <artifactId>blaze-persistence-integration-hibernate6-base</artifactId>
+                </exclusion>
+                <!-- Test-support library forced onto the compile classpath; not needed at runtime. -->
+                <exclusion>
+                    <groupId>org.hibernate.orm</groupId>
+                    <artifactId>hibernate-testing</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <!-- QueryDSL JPA (OpenFeign fork: Jakarta-native, tracks Hibernate 7.4; the original
+             com.querydsl is frozen at 5.0.0 and does not support Hibernate 7) -->
+        <dependency>
+            <groupId>io.github.openfeign.querydsl</groupId>
+            <artifactId>querydsl-jpa</artifactId>
+            <version>${openfeign-querydsl.version}</version>
+        </dependency>
+
+        <!-- Blaze-Persistence core -->
+        <dependency>
+            <groupId>com.blazebit</groupId>
+            <artifactId>blaze-persistence-core-api-jakarta</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.blazebit</groupId>
+            <artifactId>blaze-persistence-core-impl-jakarta</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Hibernate 7.2 integration (covers Hibernate ORM 7.2-7.4 used by Spring Boot 4.1) -->
+        <dependency>
+            <groupId>com.blazebit</groupId>
+            <artifactId>blaze-persistence-integration-hibernate-7.2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Blaze-Persistence Entity Views -->
+        <dependency>
+            <groupId>com.blazebit</groupId>
+            <artifactId>blaze-persistence-entity-view-api-jakarta</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.blazebit</groupId>
+            <artifactId>blaze-persistence-entity-view-impl-jakarta</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Spring integration (Jakarta / Spring 6+): @EnableEntityViews scanning + EntityViewManager bean wiring.
+             The -6.0 variant depends on the -jakarta API; the plain artifact targets the legacy javax stack. -->
+        <dependency>
+            <groupId>com.blazebit</groupId>
+            <artifactId>blaze-persistence-integration-entity-view-spring-6.0</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>com.blazebit</groupId>
+                <artifactId>blaze-persistence-bom</artifactId>
+                <version>${blaze-persistence.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>${spring-ai.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-dependencies</artifactId>
+                <version>${embabel-agent.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-compile</id>
+                        <phase>compile</phase>
+                        <goals>
+                            <goal>compile</goal>
+                        </goals>
+                        <configuration>
+                            <proc>full</proc>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>org.projectlombok</groupId>
+                                    <artifactId>lombok</artifactId>
+                                </path>
+                                <path>
+                                    <groupId>com.blazebit</groupId>
+                                    <artifactId>blaze-persistence-entity-view-processor-jakarta</artifactId>
+                                    <version>${blaze-persistence.version}</version>
+                                </path>
+                                <path>
+                                    <groupId>io.github.openfeign.querydsl</groupId>
+                                    <artifactId>querydsl-apt</artifactId>
+                                    <version>${openfeign-querydsl.version}</version>
+                                    <classifier>jpa</classifier>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>default-testCompile</id>
+                        <phase>test-compile</phase>
+                        <goals>
+                            <goal>testCompile</goal>
+                        </goals>
+                        <configuration>
+                            <proc>full</proc>
+                            <annotationProcessorPaths>
+                                <path>
+                                    <groupId>org.projectlombok</groupId>
+                                    <artifactId>lombok</artifactId>
+                                </path>
+                                <path>
+                                    <groupId>com.blazebit</groupId>
+                                    <artifactId>blaze-persistence-entity-view-processor-jakarta</artifactId>
+                                    <version>${blaze-persistence.version}</version>
+                                </path>
+                                <path>
+                                    <groupId>io.github.openfeign.querydsl</groupId>
+                                    <artifactId>querydsl-apt</artifactId>
+                                    <version>${openfeign-querydsl.version}</version>
+                                    <classifier>jpa</classifier>
+                                </path>
+                            </annotationProcessorPaths>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
