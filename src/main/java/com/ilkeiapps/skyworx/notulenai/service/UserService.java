@@ -667,7 +667,7 @@ public class UserService {
 	 * relative path in {@code users.image}.
 	 */
 	@Transactional
-	public ApiResponse<User> uploadMyPhoto(byte[] bytes) {
+	public ApiResponse<String> uploadMyPhoto(byte[] bytes) {
 		return uploadMyImage(bytes, "avatar", "user.user.image_invalid");
 	}
 
@@ -676,16 +676,17 @@ public class UserService {
 	 * {@code <mediaFolder>/signature/} and records {@code users.signature}.
 	 */
 	@Transactional
-	public ApiResponse<User> uploadMySignature(byte[] bytes) {
+	public ApiResponse<String> uploadMySignature(byte[] bytes) {
 		return uploadMyImage(bytes, "signature", "user.user.image_invalid");
 	}
 
 	/**
 	 * Shared avatar/signature upload. Validates the media folder setting and the image bytes before
-	 * touching the filesystem, writes and resizes the file, then persists the relative path.
+	 * touching the filesystem, writes and resizes the file, then persists the relative path. Returns
+	 * the stored relative path (never the managed {@code User}, which carries the password hash).
 	 */
-	private ApiResponse<User> uploadMyImage(byte[] bytes, String subFolder, String invalidImageKey) {
-		var wrap = new ApiResponse<User>();
+	private ApiResponse<String> uploadMyImage(byte[] bytes, String subFolder, String invalidImageKey) {
+		var wrap = new ApiResponse<String>();
 		wrap.setStatus(false);
 
 		var me = currentUser();
@@ -738,15 +739,15 @@ public class UserService {
 			}
 			user.setUpdatedAt(LocalDateTime.now());
 			this.em.flush();
+
+			wrap.insertNewData(storedPath);
+			wrap.setStatus(true);
+			return wrap;
 		} catch (IOException ex) {
 			log.error("failed to store {} for user {}", subFolder, user.getId(), ex);
 			wrap.setMessage(Utility.getErrorMessage(invalidImageKey));
 			return wrap;
 		}
-
-		wrap.insertNewData(user);
-		wrap.setStatus(true);
-		return wrap;
 	}
 
 	/**

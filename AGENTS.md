@@ -1336,4 +1336,16 @@ Status rows are looked up by code via a `StatusService` (e.g. `getGeneralStatusB
 ### 25.9 Blaze configuration
 `config/BlazePersistenceConfiguration`: `@EnableEntityViews("com.ilkeiapps.indotelemed.newlis.entityview")`, `@PersistenceUnit EntityManagerFactory`, and `@Bean` `CriteriaBuilderFactory` (`Criteria.getDefault().createCriteriaBuilderFactory(emf)`) + `EntityViewManager`.
 
+### 25.10 Request beans: separate create and update
+Create and update take **separate request beans**, not one shared bean with a nullable id:
+- **`XxxRequest`** — the create payload. It carries **no `id`** (the id is server-generated), so a client cannot supply one on create.
+- **`XxxUpdateRequest`** — the update payload. Same client-settable fields **plus a mandatory `id`** identifying the row being changed.
+
+Both are plain beans in `bean/` with `@Getter @Setter @ToString(includeFieldNames = true) @FieldNameConstants`, exposing only client-settable columns so server-controlled fields (`status`, audit columns, FKs that must be looked up and authorized) cannot be mass-assigned. Validate against each bean's own `Fields.*` — `updateProject` picks `XxxUpdateRequest.Fields.id` first, then the rest. The controller's `save` and `update` endpoints bind their respective bean. Delete keeps its own id-only bean (`XxxIdRequest`). Reference: `ProjectRequest` / `ProjectUpdateRequest` and `ProjectService`/`ProjectController`.
+
+### 25.11 Controllers return the service `ApiResponse` directly
+A controller endpoint **returns the service's `ApiResponse<T>` as-is**, typed to the concrete `T` (`ApiResponse<ProjectRequest>`, `ApiResponse<UserRequest>`, `ApiResponse<UserIdRequest>`, …). Do **not** add an `ack(...)` helper that re-wraps the response into `ApiResponse<String>` to carry only status + message — the service already owns the full response contract (`status`, `message`, `data`, `maxPage`), so re-wrapping is redundant and drops useful payload.
+
+This is safe **because services return scrubbed request DTOs, never managed entities** — `saveUser`/`resetPassword`/`changeMyPassword` null the password before returning, create/update/delete echo the request bean, and reads return Entity Views. The rule that makes it safe is the real constraint: **a service method whose result reaches a controller must not put a managed JPA entity in the response** (OSIV is disabled and entities can carry secrets/lazy graphs — see §6, §15). If an operation would otherwise return an entity, return a DTO/Entity View / a simple value instead — e.g. the avatar/signature uploads return `ApiResponse<String>` (the stored relative path), not `ApiResponse<User>`. Reference: `ProjectController`, `UserController`, and `UserService.uploadMyImage`.
+
 

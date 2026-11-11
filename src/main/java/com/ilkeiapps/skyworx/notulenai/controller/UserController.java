@@ -64,32 +64,32 @@ public class UserController {
 
 	@PostMapping(path = "/user/save",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> saveUser(@RequestBody UserRequest req) {
-		return ack(userService.saveUser(req));
+	public ApiResponse<UserRequest> saveUser(@RequestBody UserRequest req) {
+		return userService.saveUser(req);
 	}
 
 	@PostMapping(path = "/user/update",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> updateUser(@RequestBody UserRequest req) {
-		return ack(userService.updateUser(req));
+	public ApiResponse<UserRequest> updateUser(@RequestBody UserRequest req) {
+		return userService.updateUser(req);
 	}
 
 	@PostMapping(path = "/user/delete",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> deleteUser(@RequestBody UserIdRequest req) {
-		return ack(userService.deleteUser(req));
+	public ApiResponse<UserIdRequest> deleteUser(@RequestBody UserIdRequest req) {
+		return userService.deleteUser(req);
 	}
 
 	@PostMapping(path = "/user/resetpassword",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> resetPassword(@RequestBody UserPasswordRequest req) {
-		return ack(userService.resetPassword(req));
+	public ApiResponse<UserPasswordRequest> resetPassword(@RequestBody UserPasswordRequest req) {
+		return userService.resetPassword(req);
 	}
 
 	@PostMapping(path = "/my/resetpassword",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> resetMyPassword(@RequestBody MyPasswordRequest req) {
-		return ack(userService.changeMyPassword(req));
+	public ApiResponse<MyPasswordRequest> resetMyPassword(@RequestBody MyPasswordRequest req) {
+		return userService.changeMyPassword(req);
 	}
 
 	/**
@@ -98,13 +98,13 @@ public class UserController {
 	 */
 	@PostMapping(path = "/my/photo", produces = MediaType.APPLICATION_JSON_VALUE)
 	public ApiResponse<String> uploadMyPhoto(@RequestParam("data") MultipartFile data) {
-		return uploadAck(data, userService::uploadMyPhoto);
+		return uploadImage(data, userService::uploadMyPhoto);
 	}
 
 	/** Signature upload; same multipart contract as {@link #uploadMyPhoto}. */
 	@PostMapping(path = "/my/signature", produces = MediaType.APPLICATION_JSON_VALUE)
 	public ApiResponse<String> uploadMySignature(@RequestParam("data") MultipartFile data) {
-		return uploadAck(data, userService::uploadMySignature);
+		return uploadImage(data, userService::uploadMySignature);
 	}
 
 	@GetMapping(path = "/role/list", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -114,29 +114,22 @@ public class UserController {
 
 	@PostMapping(path = "/role/save",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> saveRole(@RequestBody RoleRequest req) {
-		return ack(userService.saveRole(req));
+	public ApiResponse<RoleRequest> saveRole(@RequestBody RoleRequest req) {
+		return userService.saveRole(req);
 	}
 
 	@PostMapping(path = "/role/update",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<String> updateRole(@RequestBody RoleRequest req) {
-		return ack(userService.updateRole(req));
-	}
-
-	/** Returns only status + message, so a managed entity in the service response is never serialized. */
-	private ApiResponse<String> ack(ApiResponse<?> src) {
-		var out = new ApiResponse<String>();
-		out.setStatus(src.getStatus());
-		out.setMessage(src.getMessage());
-		return out;
+	public ApiResponse<RoleRequest> updateRole(@RequestBody RoleRequest req) {
+		return userService.updateRole(req);
 	}
 
 	/**
-	 * Reads the uploaded bytes and delegates to {@code handler}. A missing or unreadable part is
-	 * reported through the standard wrapper rather than surfacing as a 500.
+	 * Reads the uploaded bytes and delegates to {@code handler}, returning the handler's response
+	 * directly. A missing or unreadable part is reported through the standard wrapper rather than
+	 * surfacing as a 500.
 	 */
-	private ApiResponse<String> uploadAck(MultipartFile data, Function<byte[], ApiResponse<?>> handler) {
+	private ApiResponse<String> uploadImage(MultipartFile data, Function<byte[], ApiResponse<String>> handler) {
 		byte[] bytes;
 		try {
 			bytes = data.getBytes();
@@ -147,6 +140,6 @@ public class UserController {
 			out.setMessage(Utility.getErrorMessage("user.user.image_invalid"));
 			return out;
 		}
-		return ack(handler.apply(bytes));
+		return handler.apply(bytes);
 	}
 }

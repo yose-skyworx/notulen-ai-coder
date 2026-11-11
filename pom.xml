@@ -41,6 +41,8 @@
         <jjwt-api.version>0.12.6</jjwt-api.version>
         <!-- springdoc-openapi (Swagger UI); 3.x line targets Spring Boot 4. -->
         <springdoc.version>3.2.0</springdoc.version>
+        <!-- MinIO Java SDK is not managed by any imported BOM; pin explicitly. -->
+        <minio.version>8.5.17</minio.version>
     </properties>
     <dependencies>
         <dependency>
@@ -59,6 +61,28 @@
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-vector-store-pgvector</artifactId>
         </dependency>
+        <!-- OpenAI-compatible embedding model (BGE-M3 via the sky-inference endpoint).
+             Only the embedding model is activated (spring.ai.model.chat=none); chat/LLM
+             orchestration stays on Embabel. Version managed by spring-ai-bom. -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
+        </dependency>
+
+        <!-- Hibernate pgvector support: maps float[] to a PostgreSQL vector(N) column via
+             @JdbcTypeCode(SqlTypes.VECTOR). Version managed by the Spring Boot BOM. -->
+        <dependency>
+            <groupId>org.hibernate.orm</groupId>
+            <artifactId>hibernate-vector</artifactId>
+        </dependency>
+
+        <!-- MinIO object storage for original uploaded documents. -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>${minio.version}</version>
+        </dependency>
+
         <dependency>
             <groupId>com.embabel.agent</groupId>
             <artifactId>embabel-agent-starter</artifactId>

@@ -16,6 +16,7 @@ import com.ilkeiapps.skyworx.notulenai.entity.Gender;
 import com.ilkeiapps.skyworx.notulenai.entity.GeneralStatus;
 import com.ilkeiapps.skyworx.notulenai.entity.Permission;
 import com.ilkeiapps.skyworx.notulenai.entity.Role;
+import com.ilkeiapps.skyworx.notulenai.entity.StatusProcess;
 import com.ilkeiapps.skyworx.notulenai.entity.User;
 
 import jakarta.persistence.EntityManager;
@@ -57,6 +58,11 @@ public class InitialMasterService {
 			log.info("seeded {} general statuses", statuses);
 		}
 
+		var processStatuses = seedProcessStatuses();
+		if (processStatuses > 0) {
+			log.info("seeded {} process statuses", processStatuses);
+		}
+
 		var permissions = seedPermissions();
 		if (permissions > 0) {
 			log.info("seeded {} permissions", permissions);
@@ -93,6 +99,21 @@ public class InitialMasterService {
 		n += persistGeneralStatus(STATUS_ACTIVE_ID, "AKT", "ACTIVE");
 		n += persistGeneralStatus(11, "NAK", "NOT ACTIVE");
 		n += persistGeneralStatus(12, "REM", "DELETED");
+		return n;
+	}
+
+	/**
+	 * Document-processing lifecycle statuses, stored in the same {@code status} table as the general
+	 * statuses but under the {@code PROCESS} discriminator ({@link StatusProcess}). Ids are manually
+	 * assigned in the 20-24 range to stay clear of the general statuses (10-12).
+	 */
+	private int seedProcessStatuses() {
+		var n = 0;
+		n += persistProcessStatus(20, "PENDING", "PENDING");
+		n += persistProcessStatus(21, "PROCESSING", "PROCESSING");
+		n += persistProcessStatus(22, "COMPLETED", "COMPLETED");
+		n += persistProcessStatus(23, "FAILED", "FAILED");
+		n += persistProcessStatus(24, "CANCELLED", "CANCELLED");
 		return n;
 	}
 
@@ -182,6 +203,18 @@ public class InitialMasterService {
 			return 0;
 		}
 		var s = new GeneralStatus();
+		s.setId(id);
+		s.setCode(code);
+		s.setName(name);
+		this.em.persist(s);
+		return 1;
+	}
+
+	private int persistProcessStatus(int id, String code, String name) {
+		if (existsBy(StatusProcess.class, "code", code)) {
+			return 0;
+		}
+		var s = new StatusProcess();
 		s.setId(id);
 		s.setCode(code);
 		s.setName(name);
