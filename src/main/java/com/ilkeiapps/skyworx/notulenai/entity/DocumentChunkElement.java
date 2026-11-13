@@ -41,7 +41,7 @@ public class DocumentChunkElement implements Serializable {
 	private static final long serialVersionUID = 1L;
 
 	@Id
-	@SequenceGenerator(name = "document_chunk_elements_id_generator", sequenceName = "seq_document_chunk_elements", initialValue = 1, allocationSize = 1)
+	@SequenceGenerator(name = "document_chunk_elements_id_generator", sequenceName = "seq_document_chunk_elements", initialValue = 1, allocationSize = 50)
 	@GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "document_chunk_elements_id_generator")
 	private Long id;
 

@@ -3,6 +3,7 @@ package com.ilkeiapps.skyworx.notulenai.service;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import com.ilkeiapps.skyworx.notulenai.config.MinioProperties;
@@ -25,7 +26,8 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class MinioStorageService {
+@ConditionalOnProperty(prefix = "minio", name = "enabled", havingValue = "true", matchIfMissing = true)
+public class MinioStorageService implements DocumentStorageService {
 
 	private final MinioClient minioClient;
 	private final MinioProperties properties;
@@ -46,8 +48,10 @@ public class MinioStorageService {
 	/**
 	 * Stores the given bytes under {@code objectKey} in the configured bucket and returns the key.
 	 */
+	@Override
 	public String store(String objectKey, byte[] data, String contentType) {
 		ensureBucket();
+		log.info("minio: storing {} bytes to {}/{}", data.length, properties.getBucket(), objectKey);
 		try (InputStream in = new ByteArrayInputStream(data)) {
 			minioClient.putObject(PutObjectArgs.builder()
 					.bucket(properties.getBucket())
@@ -62,7 +66,9 @@ public class MinioStorageService {
 	}
 
 	/** Opens a stream to the stored object. Caller is responsible for closing it. */
+	@Override
 	public InputStream openStream(String objectKey) {
+		log.debug("minio: opening {}/{}", properties.getBucket(), objectKey);
 		try {
 			return minioClient.getObject(GetObjectArgs.builder()
 					.bucket(properties.getBucket())
@@ -73,6 +79,7 @@ public class MinioStorageService {
 		}
 	}
 
+	@Override
 	public String bucket() {
 		return properties.getBucket();
 	}

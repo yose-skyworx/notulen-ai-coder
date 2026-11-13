@@ -18,7 +18,7 @@ import lombok.Setter;
 @DiscriminatorValue(value="GENERAL")
 @Setter
 @Getter
-public class GeneralStatus extends Status implements Serializable {
+public class StatusGeneral extends Status implements Serializable {
 	@Serial
 	private static final long serialVersionUID = 1L;
 

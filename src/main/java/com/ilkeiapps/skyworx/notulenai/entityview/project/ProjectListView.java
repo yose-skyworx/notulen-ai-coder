@@ -3,7 +3,7 @@ package com.ilkeiapps.skyworx.notulenai.entityview.project;
 import com.blazebit.persistence.view.EntityView;
 import com.blazebit.persistence.view.IdMapping;
 import com.ilkeiapps.skyworx.notulenai.entity.Client;
-import com.ilkeiapps.skyworx.notulenai.entity.GeneralStatus;
+import com.ilkeiapps.skyworx.notulenai.entity.StatusGeneral;
 import com.ilkeiapps.skyworx.notulenai.entity.Project;
 
 @EntityView(Project.class)
@@ -30,7 +30,7 @@ public interface ProjectListView {
 		String getName();
 	}
 
-	@EntityView(GeneralStatus.class)
+	@EntityView(StatusGeneral.class)
 	interface StatusView {
 		@IdMapping
 		Integer getId();

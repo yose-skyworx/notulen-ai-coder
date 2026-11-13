@@ -1,20 +1,13 @@
 package com.ilkeiapps.skyworx.notulenai.service;
 
-import java.io.StringReader;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
-
-import javax.xml.XMLConstants;
-import javax.xml.parsers.DocumentBuilderFactory;
+import java.util.regex.Pattern;
 
 import org.springframework.stereotype.Service;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
-import org.w3c.dom.NodeList;
-import org.xml.sax.InputSource;
 
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.NormalizedElement;
 
@@ -23,26 +16,36 @@ import lombok.extern.slf4j.Slf4j;
 
 /**
  * Normalization layer between Tika extraction and {@code DocumentElement} persistence. Tika's
- * {@code /rmeta} endpoint returns well-formed XHTML, so it is parsed with the JDK's built-in XML
- * parser (no third-party HTML library). The parse yields an ordered list of {@link NormalizedElement}s
- * that preserve heading hierarchy (parent linkage), paragraph/table/list boundaries, extraction order,
- * and page/slide provenance (Tika wraps PDF pages in {@code div.page} and PPT slides in
- * {@code div.slide-content}). Whitespace is normalized and empty artifacts are dropped.
+ * {@code /rmeta/md} endpoint returns structure-preserving Markdown, which this service parses with a
+ * focused, line-based reader (no third-party Markdown library). The parse yields an ordered list of
+ * {@link NormalizedElement}s that preserve heading hierarchy (parent linkage), and paragraph / list /
+ * table / code boundaries, plus extraction order.
  * <p>
- * This decouples chunking from raw Tika formats: chunking consumes {@code DocumentElement}s, never
- * the Tika response. If the XHTML cannot be parsed, a best-effort single text element is produced.
+ * This decouples chunking from the raw Tika format: chunking consumes {@code DocumentElement}s, never
+ * the Tika response. If no structural Markdown is recognised, a best-effort single text element is
+ * produced so no content is lost.
+ * <p>
+ * Note: Markdown carries no page/slide boundaries (those existed only in Tika's XHTML via
+ * {@code div.page} / {@code div.slide-content}), so {@code pageNumber} / {@code slideNumber} are left
+ * null here.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class DocumentNormalizationService {
 
-	/** Mutable traversal state threaded through the recursive walk. */
+	private static final Pattern HEADING = Pattern.compile("^(#{1,6})\\s+(.*)$");
+	private static final Pattern LIST_ITEM = Pattern.compile("^\\s*([-*+]|\\d+[.)])\\s+(.*)$");
+	private static final Pattern FENCE = Pattern.compile("^\\s*(```+|~~~+)(.*)$");
+	private static final Pattern BLOCKQUOTE = Pattern.compile("^\\s*>\\s?(.*)$");
+	private static final Pattern IMAGE_ONLY = Pattern.compile("^!\\[([^\\]]*)]\\(([^)\\s]+)[^)]*\\)$");
+	/** CommonMark backslash-escapable punctuation; Tika escapes these when emitting Markdown. */
+	private static final Pattern MD_ESCAPE = Pattern.compile("\\\\([\\\\`*_{}\\[\\]()#+\\-.!|>~])");
+
+	/** Mutable traversal state threaded through the parse. */
 	private static final class Context {
 		final List<NormalizedElement> elements = new ArrayList<>();
 		final Deque<HeadingRef> headingStack = new ArrayDeque<>();
-		int page = 0;
-		int slide = 0;
 		final int rootIndex;
 
 		Context(int rootIndex) {
@@ -56,7 +59,7 @@ public class DocumentNormalizationService {
 	/**
 	 * @param documentTitle fallback title (from Tika metadata or the original filename)
 	 */
-	public List<NormalizedElement> normalize(String xhtml, String documentTitle) {
+	public List<NormalizedElement> normalize(String markdown, String documentTitle) {
 		var ctx = new Context(0);
 
 		var root = new NormalizedElement();
@@ -67,126 +70,114 @@ public class DocumentNormalizationService {
 		root.setElementPath("/");
 		ctx.elements.add(root);
 
-		var body = parseBody(xhtml);
-		if (body == null) {
-			fallback(xhtml, ctx);
+		if (markdown == null || markdown.isBlank()) {
+			log.warn("normalize: empty markdown, produced {} element(s)", ctx.elements.size());
 			return ctx.elements;
 		}
-		walk(body, ctx);
+
+		var lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n", -1);
+		var i = 0;
+		while (i < lines.length) {
+			var line = lines[i];
+			if (line.isBlank()) {
+				i++;
+				continue;
+			}
+			var fence = FENCE.matcher(line);
+			if (fence.matches()) {
+				i = consumeCode(lines, i, fence.group(1).trim().charAt(0), ctx);
+				continue;
+			}
+			var heading = HEADING.matcher(line);
+			if (heading.matches()) {
+				emitHeading(heading.group(1).length(), heading.group(2), ctx);
+				i++;
+				continue;
+			}
+			if (isTableRow(line) && i + 1 < lines.length && isTableDelimiter(lines[i + 1])) {
+				i = consumeTable(lines, i, ctx);
+				continue;
+			}
+			if (LIST_ITEM.matcher(line).matches()) {
+				i = consumeList(lines, i, ctx);
+				continue;
+			}
+			if (BLOCKQUOTE.matcher(line).matches()) {
+				i = consumeBlockquote(lines, i, ctx);
+				continue;
+			}
+			var image = IMAGE_ONLY.matcher(line.strip());
+			if (image.matches()) {
+				emitImage(image.group(1), image.group(2), ctx);
+				i++;
+				continue;
+			}
+			i = consumeParagraph(lines, i, ctx);
+		}
+
+		if (ctx.elements.size() == 1) {
+			fallback(markdown, ctx);
+			log.warn("normalize: no structural markdown recognised, produced {} fallback element(s)",
+					ctx.elements.size());
+			return ctx.elements;
+		}
+		log.info("normalize: produced {} elements from markdown", ctx.elements.size());
 		return ctx.elements;
 	}
 
-	/** Parses the XHTML and returns the {@code <body>} element, or {@code null} if it cannot be parsed. */
-	private Element parseBody(String xhtml) {
-		if (xhtml == null || xhtml.isBlank()) {
-			return null;
-		}
-		try {
-			var factory = DocumentBuilderFactory.newInstance();
-			factory.setNamespaceAware(false);
-			factory.setExpandEntityReferences(false);
-			// XXE hardening: Tika's /rmeta output has no DOCTYPE or external entities.
-			factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-			factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-			factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-			factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+	// ---------------------------------------------------------------- block consumers
 
-			var builder = factory.newDocumentBuilder();
-			var doc = builder.parse(new InputSource(new StringReader(xhtml)));
-			var bodies = doc.getElementsByTagName("body");
-			if (bodies.getLength() > 0 && bodies.item(0) instanceof Element body) {
-				return body;
-			}
-			return doc.getDocumentElement();
-		} catch (Exception e) {
-			log.warn("unable to parse Tika XHTML, falling back to plain-text normalization: {}", e.getMessage());
-			return null;
+	/** Collects a run of plain lines (soft-wrapped) into one PARAGRAPH; stops at a blank or block start. */
+	private int consumeParagraph(String[] lines, int start, Context ctx) {
+		var parts = new ArrayList<String>();
+		var i = start;
+		while (i < lines.length && !lines[i].isBlank() && !isBlockStart(lines, i)) {
+			parts.add(lines[i].strip());
+			i++;
 		}
+		emitContent("PARAGRAPH", clean(String.join(" ", parts)), ctx);
+		return i;
 	}
 
-	private void walk(Element parent, Context ctx) {
-		for (Element child : childElements(parent)) {
-			var tag = child.getTagName().toLowerCase();
-			switch (tag) {
-				case "div" -> {
-					var cls = child.getAttribute("class");
-					if (cls.contains("page")) {
-						ctx.page++;
-					} else if (cls.contains("slide-content") || cls.contains("slide")) {
-						ctx.slide++;
-					}
-					walk(child, ctx);
+	/** Collects consecutive list items (ordered/unordered) into one LIST element. */
+	private int consumeList(String[] lines, int start, Context ctx) {
+		var items = new ArrayList<String>();
+		var i = start;
+		while (i < lines.length && !lines[i].isBlank()) {
+			var m = LIST_ITEM.matcher(lines[i]);
+			if (m.matches()) {
+				var marker = m.group(1);
+				var text = clean(m.group(2));
+				var ordered = Character.isDigit(marker.charAt(0));
+				items.add((ordered ? marker + " " : "- ") + text);
+			} else if (lines[i].startsWith(" ") || lines[i].startsWith("\t")) {
+				// Continuation / nested line of the previous item.
+				if (!items.isEmpty()) {
+					items.set(items.size() - 1, items.getLast() + " " + clean(lines[i].strip()));
 				}
-				case "h1", "h2", "h3", "h4", "h5", "h6" -> emitHeading(child, tag, ctx);
-				case "p" -> emitContent(child, "PARAGRAPH", ctx);
-				case "table" -> emitTable(child, ctx);
-				case "ul", "ol" -> emitContent(child, "LIST", ctx);
-				case "img" -> emitImage(child, ctx);
-				case "body", "article", "section" -> walk(child, ctx);
-				default -> {
-					// Unknown container: recurse if it has element children, otherwise treat text as OTHER.
-					if (!childElements(child).isEmpty()) {
-						walk(child, ctx);
-					} else {
-						emitContent(child, "OTHER", ctx);
-					}
-				}
+			} else {
+				break;
 			}
+			i++;
 		}
+		emitContent("LIST", String.join("\n", items), ctx);
+		return i;
 	}
 
-	private void emitHeading(Element el, String tag, Context ctx) {
-		var text = normalizeText(el.getTextContent());
-		if (text.isEmpty()) {
-			return;
-		}
-		var level = Integer.parseInt(tag.substring(1));
-		while (!ctx.headingStack.isEmpty() && ctx.headingStack.peek().level() >= level) {
-			ctx.headingStack.pop();
-		}
-		var parentIndex = ctx.headingStack.isEmpty() ? ctx.rootIndex : ctx.headingStack.peek().index();
-
-		var ne = base("HEADING", parentIndex, ctx);
-		ne.setHeadingLevel(level);
-		ne.setContent(text);
-		ne.setElementPath(headingPath(ctx, text));
-		var index = add(ne, ctx);
-		ctx.headingStack.push(new HeadingRef(index, level, text));
-	}
-
-	private void emitContent(Element el, String type, Context ctx) {
-		var text = normalizeText(el.getTextContent());
-		if (text.isEmpty()) {
-			return;
-		}
-		var parentIndex = ctx.headingStack.isEmpty() ? ctx.rootIndex : ctx.headingStack.peek().index();
-		var ne = base(type, parentIndex, ctx);
-		ne.setContent(text);
-		ne.setElementPath(currentPath(ctx));
-		add(ne, ctx);
-	}
-
-	private void emitTable(Element table, Context ctx) {
+	/** Collects a GFM pipe table (header row, delimiter, body rows) into a TABLE + TABLE_ROW elements. */
+	private int consumeTable(String[] lines, int start, Context ctx) {
 		var rows = new ArrayList<List<String>>();
-		var trNodes = table.getElementsByTagName("tr");
-		for (var i = 0; i < trNodes.getLength(); i++) {
-			if (!(trNodes.item(i) instanceof Element tr)) {
-				continue;
-			}
-			var cells = new ArrayList<String>();
-			for (Element cell : childElements(tr)) {
-				cells.add(normalizeText(cell.getTextContent()));
-			}
-			if (!cells.isEmpty()) {
-				rows.add(cells);
-			}
+		rows.add(parseRow(lines[start]));
+		var i = start + 2; // skip the header row and the delimiter row
+		while (i < lines.length && isTableRow(lines[i])) {
+			rows.add(parseRow(lines[i]));
+			i++;
 		}
 		if (rows.isEmpty()) {
-			return;
+			return i;
 		}
-		var parentIndex = ctx.headingStack.isEmpty() ? ctx.rootIndex : ctx.headingStack.peek().index();
-
-		var tableEl = base("TABLE", parentIndex, ctx);
+		var parentIndex = currentParent(ctx);
+		var tableEl = base("TABLE", parentIndex);
 		tableEl.setContent(renderTable(rows));
 		tableEl.setElementPath(currentPath(ctx));
 		var structured = new LinkedHashMap<String, Object>();
@@ -199,43 +190,164 @@ public class DocumentNormalizationService {
 		var tableIndex = add(tableEl, ctx);
 
 		for (List<String> row : rows) {
-			var rowEl = base("TABLE_ROW", tableIndex, ctx);
+			var rowEl = base("TABLE_ROW", tableIndex);
 			rowEl.setContent(String.join(" | ", row));
 			rowEl.setElementPath(currentPath(ctx));
 			add(rowEl, ctx);
 		}
+		return i;
 	}
 
-	private void emitImage(Element img, Context ctx) {
-		var alt = normalizeText(img.getAttribute("alt"));
+	/** Collects a fenced code block verbatim into a CODE element. */
+	private int consumeCode(String[] lines, int start, char fenceChar, Context ctx) {
+		var body = new ArrayList<String>();
+		var i = start + 1;
+		while (i < lines.length) {
+			var stripped = lines[i].strip();
+			if (stripped.length() >= 3 && stripped.charAt(0) == fenceChar
+					&& stripped.chars().allMatch(c -> c == fenceChar)) {
+				i++; // consume the closing fence
+				break;
+			}
+			body.add(lines[i]);
+			i++;
+		}
+		var content = String.join("\n", body).stripTrailing();
+		if (!content.isBlank()) {
+			var ne = base("CODE", currentParent(ctx));
+			ne.setContent(content);
+			ne.setElementPath(currentPath(ctx));
+			add(ne, ctx);
+		}
+		return i;
+	}
+
+	/** Collects consecutive blockquote lines into one PARAGRAPH (markers stripped). */
+	private int consumeBlockquote(String[] lines, int start, Context ctx) {
+		var parts = new ArrayList<String>();
+		var i = start;
+		while (i < lines.length && !lines[i].isBlank()) {
+			var m = BLOCKQUOTE.matcher(lines[i]);
+			if (!m.matches()) {
+				break;
+			}
+			parts.add(m.group(1).strip());
+			i++;
+		}
+		emitContent("PARAGRAPH", clean(String.join(" ", parts)), ctx);
+		return i;
+	}
+
+	// ---------------------------------------------------------------- element emitters
+
+	private void emitHeading(int level, String rawText, Context ctx) {
+		// Drop any trailing closing hashes of an ATX heading, then clean.
+		var text = clean(rawText.replaceAll("\\s*#+\\s*$", ""));
+		if (text.isEmpty()) {
+			return;
+		}
+		while (!ctx.headingStack.isEmpty() && ctx.headingStack.peek().level() >= level) {
+			ctx.headingStack.pop();
+		}
 		var parentIndex = ctx.headingStack.isEmpty() ? ctx.rootIndex : ctx.headingStack.peek().index();
-		var ne = base("IMAGE", parentIndex, ctx);
-		ne.setContent(alt);
+
+		var ne = base("HEADING", parentIndex);
+		ne.setHeadingLevel(level);
+		ne.setContent(text);
+		ne.setElementPath(headingPath(ctx, text));
+		var index = add(ne, ctx);
+		ctx.headingStack.push(new HeadingRef(index, level, text));
+	}
+
+	private void emitContent(String type, String text, Context ctx) {
+		if (text == null || text.isBlank()) {
+			return;
+		}
+		var ne = base(type, currentParent(ctx));
+		ne.setContent(text);
+		ne.setElementPath(currentPath(ctx));
+		add(ne, ctx);
+	}
+
+	private void emitImage(String alt, String src, Context ctx) {
+		var ne = base("IMAGE", currentParent(ctx));
+		ne.setContent(clean(alt));
 		ne.setElementPath(currentPath(ctx));
 		var meta = new LinkedHashMap<String, Object>();
-		meta.put("src", img.getAttribute("src"));
+		meta.put("src", src);
 		ne.setMetadata(meta);
 		add(ne, ctx);
 	}
 
-	/** Produces a single OTHER element from the raw content when the XHTML could not be parsed. */
-	private void fallback(String xhtml, Context ctx) {
-		var text = normalizeText(xhtml == null ? "" : xhtml.replaceAll("<[^>]+>", " "));
+	/** Produces a single OTHER element from the raw content when no structure was recognised. */
+	private void fallback(String markdown, Context ctx) {
+		var text = clean(markdown);
 		if (text.isEmpty()) {
 			return;
 		}
-		var ne = base("OTHER", ctx.rootIndex, ctx);
+		var ne = base("OTHER", ctx.rootIndex);
 		ne.setContent(text);
 		ne.setElementPath("/");
 		add(ne, ctx);
 	}
 
-	private NormalizedElement base(String type, int parentIndex, Context ctx) {
+	// ---------------------------------------------------------------- parsing helpers
+
+	/** True if the line at {@code idx} starts a non-paragraph block (so a paragraph run must stop). */
+	private boolean isBlockStart(String[] lines, int idx) {
+		var line = lines[idx];
+		if (HEADING.matcher(line).matches() || FENCE.matcher(line).matches()
+				|| LIST_ITEM.matcher(line).matches() || BLOCKQUOTE.matcher(line).matches()) {
+			return true;
+		}
+		return isTableRow(line) && idx + 1 < lines.length && isTableDelimiter(lines[idx + 1]);
+	}
+
+	private boolean isTableRow(String line) {
+		var s = line.strip();
+		return s.contains("|") && !isTableDelimiter(line);
+	}
+
+	/** A GFM delimiter row: only pipes, colons, dashes and spaces, with at least one dash. */
+	private boolean isTableDelimiter(String line) {
+		var s = line.strip();
+		if (s.isEmpty() || s.indexOf('-') < 0) {
+			return false;
+		}
+		for (var c : s.toCharArray()) {
+			if (c != '|' && c != ':' && c != '-' && c != ' ') {
+				return false;
+			}
+		}
+		return s.contains("|");
+	}
+
+	/** Splits a pipe-table row into trimmed, unescaped cells (ignoring escaped pipes). */
+	private List<String> parseRow(String line) {
+		var s = line.strip();
+		if (s.startsWith("|")) {
+			s = s.substring(1);
+		}
+		if (s.endsWith("|") && !s.endsWith("\\|")) {
+			s = s.substring(0, s.length() - 1);
+		}
+		var cells = new ArrayList<String>();
+		for (var cell : s.split("(?<!\\\\)\\|", -1)) {
+			cells.add(clean(cell));
+		}
+		return cells;
+	}
+
+	// ---------------------------------------------------------------- shared helpers
+
+	private int currentParent(Context ctx) {
+		return ctx.headingStack.isEmpty() ? ctx.rootIndex : ctx.headingStack.peek().index();
+	}
+
+	private NormalizedElement base(String type, int parentIndex) {
 		var ne = new NormalizedElement();
 		ne.setElementType(type);
 		ne.setParentIndex(parentIndex);
-		ne.setPageNumber(ctx.page > 0 ? ctx.page : null);
-		ne.setSlideNumber(ctx.slide > 0 ? ctx.slide : null);
 		return ne;
 	}
 
@@ -244,19 +356,6 @@ public class DocumentNormalizationService {
 		ne.setSequenceNumber(index);
 		ctx.elements.add(ne);
 		return index;
-	}
-
-	/** Direct child element nodes of {@code parent}, in document order. */
-	private List<Element> childElements(Element parent) {
-		var out = new ArrayList<Element>();
-		NodeList children = parent.getChildNodes();
-		for (var i = 0; i < children.getLength(); i++) {
-			var node = children.item(i);
-			if (node.getNodeType() == Node.ELEMENT_NODE && node instanceof Element el) {
-				out.add(el);
-			}
-		}
-		return out;
 	}
 
 	private String currentPath(Context ctx) {
@@ -284,10 +383,15 @@ public class DocumentNormalizationService {
 		return sb.toString().strip();
 	}
 
-	private String normalizeText(String text) {
+	/** Unescapes Markdown backslash-escapes, collapses punctuation leaders and whitespace. */
+	private String clean(String text) {
 		if (text == null) {
 			return "";
 		}
-		return text.replaceAll("\\s+", " ").strip();
+		var unescaped = MD_ESCAPE.matcher(text).replaceAll("$1");
+		// Collapse runs of 4+ identical punctuation chars (dot/dash leaders in tables of contents,
+		// rule lines, etc.) to a single char — they carry no meaning and explode tokenizer counts.
+		var collapsed = unescaped.replaceAll("([^\\w\\s])\\1{3,}", "$1");
+		return collapsed.replaceAll("\\s+", " ").strip();
 	}
 }

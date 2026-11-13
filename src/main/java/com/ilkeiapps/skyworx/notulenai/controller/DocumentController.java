@@ -6,7 +6,6 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -22,9 +21,11 @@ import com.ilkeiapps.skyworx.notulenai.bean.web.DocumentRequestParameter;
 import com.ilkeiapps.skyworx.notulenai.entityview.document.KnowledgeDocumentListView;
 import com.ilkeiapps.skyworx.notulenai.service.KnowledgeDocumentService;
 import com.ilkeiapps.skyworx.notulenai.service.KnowledgeProcessingService;
-import com.ilkeiapps.skyworx.notulenai.service.MinioStorageService;
+import com.ilkeiapps.skyworx.notulenai.service.DocumentStorageService;
 
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Knowledge-base document endpoints under {@code /api/knowledge/document} (JWT-guarded via
@@ -32,6 +33,7 @@ import lombok.RequiredArgsConstructor;
  * extraction pipeline runs separately. List/detail return Entity Views; nothing returns a managed
  * entity. Download streams the original from MinIO.
  */
+@Slf4j
 @RestController
 @RequestMapping(path = "/api/knowledge/document")
 @RequiredArgsConstructor
@@ -39,13 +41,43 @@ public class DocumentController {
 
 	private final KnowledgeDocumentService documentService;
 	private final KnowledgeProcessingService processingService;
-	private final MinioStorageService storageService;
+	private final DocumentStorageService storageService;
 
 	@PostMapping(path = "/upload",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-	public ApiResponse<DocumentUploadResponse> upload(@ModelAttribute DocumentUploadRequest meta,
-			@RequestParam("file") MultipartFile file) {
+	public ApiResponse<DocumentUploadResponse> upload(
+			@RequestParam(value = "file", required = false) MultipartFile file,
+			@RequestParam(value = "projectId", required = false) Long projectId,
+			@RequestParam(value = "documentTitle", required = false) String documentTitle,
+			@RequestParam(value = "description", required = false) String description,
+			@RequestParam(value = "logicalDocumentId", required = false) Long logicalDocumentId,
+			HttpServletRequest request) {
+		if (file == null || file.isEmpty()) {
+			// Diagnostic: shows whether the request actually arrived as a parsed multipart with a 'file'
+			// part. A content-type without "boundary=" means the client overrode the Content-Type header.
+			log.warn("upload: 'file' part missing/empty. contentType='{}', multipart={}, partNames={}",
+					request.getContentType(), request instanceof org.springframework.web.multipart.MultipartHttpServletRequest,
+					safePartNames(request));
+		}
+		var meta = new DocumentUploadRequest();
+		meta.setProjectId(projectId);
+		meta.setDocumentTitle(documentTitle);
+		meta.setDescription(description);
+		meta.setLogicalDocumentId(logicalDocumentId);
 		return documentService.upload(meta, file);
+	}
+
+	/** Best-effort list of multipart part names, for diagnosing failed uploads. */
+	private String safePartNames(HttpServletRequest request) {
+		try {
+			var names = new java.util.ArrayList<String>();
+			for (var part : request.getParts()) {
+				names.add(part.getName() + "(" + part.getSize() + "B)");
+			}
+			return names.toString();
+		} catch (Exception e) {
+			return "<unavailable: " + e.getClass().getSimpleName() + ">";
+		}
 	}
 
 	@GetMapping(path = "/list", produces = MediaType.APPLICATION_JSON_VALUE)
@@ -60,13 +92,14 @@ public class DocumentController {
 	}
 
 	/**
-	 * Runs extraction + normalization for a document (Phase 1: synchronous trigger). Phase 2 replaces
-	 * this with asynchronous, automatically-queued processing.
+	 * Runs the full processing pipeline (extract → normalize → chunk → embed → persist) synchronously
+	 * and returns element/chunk counts. Upload also triggers this automatically (asynchronously), so
+	 * this endpoint is mainly for on-demand (re)processing and verification.
 	 */
 	@PostMapping(path = "/process",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
 	public ApiResponse<String> process(@RequestBody DocumentIdRequest req) {
-		return processingService.extractAndNormalize(req.getId());
+		return processingService.process(req.getId());
 	}
 
 	@GetMapping(path = "/download")

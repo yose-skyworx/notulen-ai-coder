@@ -64,7 +64,7 @@ public class ClientService {
 		var client = new Client();
 		client.setCode(src.getCode());
 		client.setName(src.getName());
-		client.setStatus(statusService.getGeneralStatusByCode("AKT"));
+		client.setStatus(statusService.getStatusGeneralByCode("AKT"));
 
 		this.em.persist(client);
 		this.em.flush();
@@ -167,7 +167,7 @@ public class ClientService {
 			return wrap;
 		}
 
-		var removed = statusService.getGeneralStatusByCode("REM");
+		var removed = statusService.getStatusGeneralByCode("REM");
 		if (removed == null) {
 			wrap.setMessage(Utility.getErrorMessage("client.client.status_missing"));
 			return wrap;

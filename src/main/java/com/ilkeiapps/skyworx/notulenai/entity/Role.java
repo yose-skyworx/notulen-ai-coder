@@ -67,7 +67,7 @@ public class Role implements Serializable {
 
 	@ManyToOne(fetch = FetchType.LAZY)
 	@JoinColumn(name="status_id")
-	private GeneralStatus status;
+	private StatusGeneral status;
 
 
 	public Role() {

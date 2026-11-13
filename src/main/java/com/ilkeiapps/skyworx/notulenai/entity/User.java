@@ -92,7 +92,7 @@ public class User implements Serializable {
 	private Institution institution;
 
 	@ManyToOne(fetch = FetchType.LAZY)
-	private GeneralStatus status;
+	private StatusGeneral status;
 
 	public User() {
 	}

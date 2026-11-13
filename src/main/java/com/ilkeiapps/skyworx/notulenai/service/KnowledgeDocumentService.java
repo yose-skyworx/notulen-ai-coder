@@ -4,6 +4,7 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -16,6 +17,7 @@ import com.ilkeiapps.ilkeitool.validator.ProcessResult;
 import com.ilkeiapps.ilkeitoolentityblazebit.validator.IlKeiEntityValidator;
 import com.ilkeiapps.skyworx.notulenai.bean.DocumentUploadRequest;
 import com.ilkeiapps.skyworx.notulenai.bean.DocumentUploadResponse;
+import com.ilkeiapps.skyworx.notulenai.bean.knowledge.DocumentUploadedEvent;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.DownloadResource;
 import com.ilkeiapps.skyworx.notulenai.bean.web.ApiResponse;
 import com.ilkeiapps.skyworx.notulenai.bean.web.DocumentIdRequest;
@@ -54,9 +56,10 @@ public class KnowledgeDocumentService {
 	private final CriteriaBuilderFactory configBuilder;
 	private final EntityViewManager viewManager;
 	private final StatusService statusService;
-	private final MinioStorageService storageService;
+	private final DocumentStorageService storageService;
 	private final KnowledgeProperties properties;
 	private final UserService userService;
+	private final ApplicationEventPublisher eventPublisher;
 
 	@Transactional
 	public ApiResponse<DocumentUploadResponse> upload(DocumentUploadRequest meta, MultipartFile file) {
@@ -109,6 +112,8 @@ public class KnowledgeDocumentService {
 		var objectKey = "project/" + meta.getProjectId() + "/" + java.util.UUID.randomUUID()
 				+ (extension.isEmpty() ? "" : "." + extension);
 
+		log.info("upload: project={} file='{}' ({} bytes, {}) -> storageKey={}", meta.getProjectId(),
+				originalFilename, file.getSize(), file.getContentType(), objectKey);
 		storageService.store(objectKey, data, file.getContentType());
 
 		var now = Instant.now();
@@ -143,6 +148,11 @@ public class KnowledgeDocumentService {
 		}
 
 		createJob(document, project, pending, now);
+		log.info("upload: created document id={} (logicalId={}, v{}) status=PENDING; processing will run after commit",
+				document.getId(), document.getLogicalDocumentId(), document.getVersionNumber());
+
+		// Processing runs after this transaction commits, off the request thread.
+		eventPublisher.publishEvent(new DocumentUploadedEvent(document.getId()));
 
 		var response = new DocumentUploadResponse();
 		response.setDocumentId(document.getId());

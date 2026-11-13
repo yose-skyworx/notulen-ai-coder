@@ -17,17 +17,17 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Apache Tika Server integration. Sends the document bytes to {@code PUT /rmeta}, which returns a
+ * Apache Tika Server integration. Sends the document bytes to {@code PUT /rmeta/md}, which returns a
  * JSON array of metadata objects (one per embedded document); the first object is the main document,
- * whose {@code X-TIKA:content} field holds structure-preserving XHTML (headings, paragraphs, tables,
- * and page/slide divs). The bytes are streamed to Tika rather than parsed in-process.
+ * whose {@code tk:content} field holds structure-preserving Markdown (ATX headings, paragraphs, GFM
+ * tables, lists). The bytes are streamed to Tika rather than parsed in-process.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TikaExtractionService {
 
-	private static final String TIKA_CONTENT_KEY = "X-TIKA:content";
+	private static final String TIKA_CONTENT_KEY = "tk:content";
 
 	/**
 	 * Local Jackson (2.x) mapper for reading Tika's JSON array. Spring Boot 4 auto-configures a
@@ -39,8 +39,10 @@ public class TikaExtractionService {
 	private final @Qualifier("tikaRestClient") RestClient tikaRestClient;
 
 	public TikaExtraction extract(byte[] data, String contentType) {
+		var start = System.currentTimeMillis();
+		log.info("tika: PUT /rmeta/md with {} bytes (contentType={})", data.length, contentType);
 		String body = tikaRestClient.put()
-				.uri("/rmeta")
+				.uri("/rmeta/md")
 				.accept(MediaType.APPLICATION_JSON)
 				.contentType(contentType != null ? MediaType.parseMediaType(contentType) : MediaType.APPLICATION_OCTET_STREAM)
 				.body(data)
@@ -54,11 +56,15 @@ public class TikaExtractionService {
 			throw new IllegalStateException("Unable to parse Tika Server response", e);
 		}
 		if (parsed == null || parsed.isEmpty()) {
+			log.warn("tika: empty response in {} ms", System.currentTimeMillis() - start);
 			return new TikaExtraction(null, contentType, "", Map.of());
 		}
 
 		var main = parsed.getFirst();
-		var xhtml = asString(main.get(TIKA_CONTENT_KEY));
+		log.info("tika: parsed {} metadata object(s), content length={} in {} ms", parsed.size(),
+				main.get(TIKA_CONTENT_KEY) == null ? 0 : String.valueOf(main.get(TIKA_CONTENT_KEY)).length(),
+				System.currentTimeMillis() - start);
+		var content = asString(main.get(TIKA_CONTENT_KEY));
 		var title = asString(main.get("dc:title"));
 		var detectedType = asString(main.get("Content-Type"));
 
@@ -70,7 +76,7 @@ public class TikaExtractionService {
 			metadata.put(entry.getKey(), asString(entry.getValue()));
 		}
 		return new TikaExtraction(title, detectedType != null ? detectedType : contentType,
-				xhtml != null ? xhtml : "", metadata);
+				content != null ? content : "", metadata);
 	}
 
 	private String asString(Object value) {

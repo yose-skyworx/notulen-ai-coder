@@ -189,7 +189,7 @@ public class UserService {
 		user.setPassword(passwordEncoder.encode(src.getPassword()));
 		user.setGender(this.em.find(Gender.class, src.getGenderId().intValue()));
 		user.setRoles(this.em.find(Role.class, src.getRoleId()));
-		user.setStatus(statusService.getGeneralStatusByCode("AKT"));
+		user.setStatus(statusService.getStatusGeneralByCode("AKT"));
 		user.setCreatedAt(LocalDateTime.now());
 		user.setCreatedBy(currentUser());
 
@@ -331,7 +331,7 @@ public class UserService {
 		role.setName(src.getName());
 		role.setDisplayName(src.getDisplayName());
 		role.setDescription(src.getDescription());
-		role.setStatus(statusService.getGeneralStatusByCode("AKT"));
+		role.setStatus(statusService.getStatusGeneralByCode("AKT"));
 		role.setCreatedAt(LocalDateTime.now());
 
 		this.em.persist(role);
@@ -566,7 +566,7 @@ public class UserService {
 			return wrap;
 		}
 
-		var removed = statusService.getGeneralStatusByCode("REM");
+		var removed = statusService.getStatusGeneralByCode("REM");
 		if (removed == null) {
 			wrap.setMessage(Utility.getErrorMessage("user.user.status_missing"));
 			return wrap;

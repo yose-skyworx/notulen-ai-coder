@@ -78,7 +78,7 @@ public class ProjectService {
 		project.setCode(src.getCode());
 		project.setName(src.getName());
 		project.setClient(this.em.find(Client.class, src.getClientId()));
-		project.setStatus(statusService.getGeneralStatusByCode("AKT"));
+		project.setStatus(statusService.getStatusGeneralByCode("AKT"));
 
 		this.em.persist(project);
 		this.em.flush();
@@ -196,7 +196,7 @@ public class ProjectService {
 			return wrap;
 		}
 
-		var removed = statusService.getGeneralStatusByCode("REM");
+		var removed = statusService.getStatusGeneralByCode("REM");
 		if (removed == null) {
 			wrap.setMessage(Utility.getErrorMessage("project.project.status_missing"));
 			return wrap;

@@ -13,7 +13,7 @@ import com.blazebit.persistence.CriteriaBuilderFactory;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.ShowType;
 import com.ilkeiapps.skyworx.notulenai.bean.web.ApiResponse;
 import com.ilkeiapps.skyworx.notulenai.entity.Gender;
-import com.ilkeiapps.skyworx.notulenai.entity.GeneralStatus;
+import com.ilkeiapps.skyworx.notulenai.entity.StatusGeneral;
 import com.ilkeiapps.skyworx.notulenai.entity.Permission;
 import com.ilkeiapps.skyworx.notulenai.entity.Role;
 import com.ilkeiapps.skyworx.notulenai.entity.StatusProcess;
@@ -96,9 +96,9 @@ public class InitialMasterService {
 
 	private int seedStatuses() {
 		var n = 0;
-		n += persistGeneralStatus(STATUS_ACTIVE_ID, "AKT", "ACTIVE");
-		n += persistGeneralStatus(11, "NAK", "NOT ACTIVE");
-		n += persistGeneralStatus(12, "REM", "DELETED");
+		n += persistStatusGeneral(STATUS_ACTIVE_ID, "AKT", "ACTIVE");
+		n += persistStatusGeneral(11, "NAK", "NOT ACTIVE");
+		n += persistStatusGeneral(12, "REM", "DELETED");
 		return n;
 	}
 
@@ -178,7 +178,7 @@ public class InitialMasterService {
 		user.setName("Administrator");
 		user.setGender(this.em.find(Gender.class, 1));
 		user.setRoles(roleByName("SUPERADMIN"));
-		user.setStatus(this.em.find(GeneralStatus.class, STATUS_ACTIVE_ID));
+		user.setStatus(this.em.find(StatusGeneral.class, STATUS_ACTIVE_ID));
 		user.setUsername("superadmin");
 		user.setPassword(passwordEncoder.encode(DEFAULT_SUPERADMIN_PASSWORD));
 		user.setCreatedAt(LocalDateTime.now());
@@ -198,11 +198,11 @@ public class InitialMasterService {
 
 	// ---------------------------------------------------------------- persist helpers (idempotent)
 
-	private int persistGeneralStatus(int id, String code, String name) {
-		if (existsBy(GeneralStatus.class, "code", code)) {
+	private int persistStatusGeneral(int id, String code, String name) {
+		if (existsBy(StatusGeneral.class, "code", code)) {
 			return 0;
 		}
-		var s = new GeneralStatus();
+		var s = new StatusGeneral();
 		s.setId(id);
 		s.setCode(code);
 		s.setName(name);
@@ -240,7 +240,7 @@ public class InitialMasterService {
 		var r = new Role();
 		r.setName(name);
 		r.setPermissions(permissions);
-		r.setStatus(this.em.find(GeneralStatus.class, STATUS_ACTIVE_ID));
+		r.setStatus(this.em.find(StatusGeneral.class, STATUS_ACTIVE_ID));
 		this.em.persist(r);
 		return 1;
 	}

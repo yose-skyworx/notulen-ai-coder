@@ -45,7 +45,7 @@ public class DocumentElement implements Serializable {
 	private static final long serialVersionUID = 1L;
 
 	@Id
-	@SequenceGenerator(name = "document_elements_id_generator", sequenceName = "seq_document_elements", initialValue = 1, allocationSize = 1)
+	@SequenceGenerator(name = "document_elements_id_generator", sequenceName = "seq_document_elements", initialValue = 1, allocationSize = 50)
 	@GeneratedValue(strategy = GenerationType.SEQUENCE, generator = "document_elements_id_generator")
 	private Long id;
 

@@ -2,7 +2,7 @@ package com.ilkeiapps.skyworx.notulenai.entityview.user;
 
 import com.blazebit.persistence.view.EntityView;
 import com.blazebit.persistence.view.IdMapping;
-import com.ilkeiapps.skyworx.notulenai.entity.GeneralStatus;
+import com.ilkeiapps.skyworx.notulenai.entity.StatusGeneral;
 import com.ilkeiapps.skyworx.notulenai.entity.Role;
 import com.ilkeiapps.skyworx.notulenai.entity.User;
 
@@ -34,7 +34,7 @@ public interface UserListView {
 		String getDisplayName();
 	}
 
-	@EntityView(GeneralStatus.class)
+	@EntityView(StatusGeneral.class)
 	interface StatusView {
 		@IdMapping
 		Integer getId();

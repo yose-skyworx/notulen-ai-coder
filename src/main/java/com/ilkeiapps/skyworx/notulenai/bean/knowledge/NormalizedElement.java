@@ -6,7 +6,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * A single normalized document element produced by the normalization layer from Tika's XHTML, before
+ * A single normalized document element produced by the normalization layer from Tika's Markdown, before
  * it is persisted as a {@code DocumentElement}. Carries structure and provenance (sequence, heading
  * level, page/slide, parent linkage by sequence index). Internal processing holder, not a REST DTO.
  */

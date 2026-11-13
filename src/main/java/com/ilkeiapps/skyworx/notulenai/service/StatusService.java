@@ -4,8 +4,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import com.blazebit.persistence.CriteriaBuilderFactory;
-import com.ilkeiapps.skyworx.notulenai.entity.GeneralStatus;
-import com.ilkeiapps.skyworx.notulenai.entity.QGeneralStatus;
+import com.ilkeiapps.skyworx.notulenai.entity.StatusGeneral;
+import com.ilkeiapps.skyworx.notulenai.entity.QStatusGeneral;
 import com.ilkeiapps.skyworx.notulenai.entity.QStatusProcess;
 import com.ilkeiapps.skyworx.notulenai.entity.StatusProcess;
 
@@ -26,9 +26,9 @@ public class StatusService {
 	private final CriteriaBuilderFactory configBuilder;
 
 	@Transactional(readOnly = true)
-	public GeneralStatus getGeneralStatusByCode(String code) {
-		var qs = new QGeneralStatus("s");
-		var rows = configBuilder.create(em, GeneralStatus.class).from(GeneralStatus.class, qs.getMetadata().getName())
+	public StatusGeneral getStatusGeneralByCode(String code) {
+		var qs = new QStatusGeneral("s");
+		var rows = configBuilder.create(em, StatusGeneral.class).from(StatusGeneral.class, qs.getMetadata().getName())
 				.where(qs.code.toString()).eq(code)
 				.setMaxResults(1)
 				.getResultList();
