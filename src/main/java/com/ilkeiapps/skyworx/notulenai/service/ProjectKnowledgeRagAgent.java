@@ -12,6 +12,7 @@ import com.embabel.agent.api.common.OperationContext;
 import com.embabel.common.ai.model.LlmOptions;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.Citation;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.KnowledgeSearchResult;
+import com.ilkeiapps.skyworx.notulenai.bean.knowledge.LlmAnswer;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.RagAnswer;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.RagQuery;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.RetrievedChunks;
@@ -25,13 +26,13 @@ import lombok.extern.slf4j.Slf4j;
  * {@code retrieve} → {@code answer}: the first action runs project-scoped semantic retrieval, the
  * second grounds an LLM answer on the retrieved chunks and attaches real citations.
  * <p>
- * The answer is generated as <em>plain text</em> (not a structured object): the configured model
- * ({@code lfm-1.2b}) is small and cannot reliably produce the JSON that structured output binding
- * requires, so demanding it caused repeated parse-retry failures. Instead the LLM is told to answer
- * only from the numbered context and to cite sources as {@code [n]}; citations are then rebuilt from the
- * actually-retrieved chunks by parsing those markers (falling back to all retrieved chunks), so a
- * document or page reference can never be fabricated. The agent performs <em>no</em> authorization —
- * {@code KnowledgeRagService} validates project access before invoking it.
+ * The answer is produced as a structured {@link LlmAnswer} (answer text, a grounded flag, and the
+ * 1-based numbers of the context sources the model used); this requires a model capable of reliable
+ * structured output. Only those source numbers are trusted from the model: the agent rebuilds the real
+ * {@link Citation} metadata from the actually-retrieved chunks (falling back to the {@code [n]} markers
+ * in the text, then to all retrieved chunks), so a document or page reference can never be fabricated.
+ * The agent performs <em>no</em> authorization — {@code KnowledgeRagService} validates project access
+ * before invoking it.
  * <p>
  * {@code @Agent} is meta-annotated {@code @Component}, so this is a Spring bean; Embabel's annotation
  * scanning registers it with the platform at startup. Neither action is {@code @Transactional}: the
@@ -47,20 +48,18 @@ import lombok.extern.slf4j.Slf4j;
 public class ProjectKnowledgeRagAgent {
 
 	private static final String SYSTEM_PROMPT = """
-			You are a retrieval-augmented assistant for a project knowledge base.
-			Answer ONLY using the numbered context sources provided. Do not use outside knowledge.
-			Cite the sources you use by their number in square brackets, e.g. [1] or [2].
-			If the context does not contain enough information to answer, reply exactly:
-			"The documents do not contain the information to answer this question."
-			Do not guess or invent facts. Answer in the same language as the question.
+			Anda adalah asisten yang menjawab berdasarkan basis pengetahuan sebuah proyek.
+			Jawab HANYA menggunakan sumber konteks bernomor yang diberikan. Jangan gunakan pengetahuan di luar konteks.
+			Selalu jawab dalam Bahasa Indonesia, apa pun bahasa pertanyaannya.
+			Pada kolom "answer", kutip sumber yang Anda gunakan dengan nomornya dalam tanda kurung siku, misalnya [1] atau [2].
+			Cantumkan nomor sumber yang sama pada kolom "citedSources".
+			Isi "grounded" dengan true hanya jika konteks memuat cukup informasi untuk menjawab; jika tidak, isi
+			dengan false dan nyatakan pada kolom "answer" bahwa dokumen tidak memuat informasi tersebut.
+			Jangan menebak atau mengarang fakta.
 			""";
 
-	/** Matches source markers like {@code [1]} that the model is asked to cite. */
+	/** Matches source markers like {@code [1]} in the answer text; a fallback when the model omits citedSources. */
 	private static final Pattern SOURCE_MARKER = Pattern.compile("\\[(\\d{1,3})\\]");
-
-	private static final List<String> INSUFFICIENT_MARKERS = List.of(
-			"do not contain", "does not contain", "not contain the information", "no relevant information",
-			"cannot find", "could not find", "tidak terdapat", "tidak ada informasi", "tidak mengandung");
 
 	private final DocumentRetrievalService retrievalService;
 	private final KnowledgeProperties properties;
@@ -80,18 +79,18 @@ public class ProjectKnowledgeRagAgent {
 		if (results.isEmpty()) {
 			log.info("rag.answer: no context for project={}; returning insufficient", query.getProjectId());
 			return RagAnswer.insufficient(query.getQuestion(),
-					"The project knowledge base does not contain information to answer this question.");
+					"Basis pengetahuan proyek tidak memuat informasi untuk menjawab pertanyaan ini.");
 		}
 
 		var prompt = buildPrompt(query.getQuestion(), results);
 		var llmOptions = LlmOptions.withDefaultLlm().withTemperature(properties.getRag().getTemperature());
 
-		var text = context.ai()
+		var llmAnswer = context.ai()
 				.withLlm(llmOptions)
 				.withSystemPrompt(SYSTEM_PROMPT)
-				.generateText(prompt);
+				.createObject(prompt, LlmAnswer.class);
 
-		return assemble(query.getQuestion(), results, text);
+		return assemble(query.getQuestion(), results, llmAnswer);
 	}
 
 	/** Builds the user prompt: numbered, provenance-tagged context passages followed by the question. */
@@ -144,36 +143,41 @@ public class ProjectKnowledgeRagAgent {
 	}
 
 	/**
-	 * Builds the final answer from the model's plain-text output. An explicit "no information" reply is
-	 * reported as not grounded with no citations. Otherwise citations are rebuilt from the real retrieved
-	 * chunks using the {@code [n]} markers the model cited (or all retrieved chunks when it cited none),
-	 * so references always point at actually-retrieved content.
+	 * Builds the final answer from the model's structured output. When the model reports the context was
+	 * insufficient (or produced no answer), it is returned as not grounded with no citations. Otherwise
+	 * citations are rebuilt from the real retrieved chunks using the source numbers the model reported
+	 * (falling back to the {@code [n]} markers in the text, then to all retrieved chunks), so references
+	 * always point at actually-retrieved content.
 	 */
-	private RagAnswer assemble(String question, List<KnowledgeSearchResult> results, String text) {
-		var body = text != null ? text.strip() : "";
+	private RagAnswer assemble(String question, List<KnowledgeSearchResult> results, LlmAnswer llmAnswer) {
+		var body = llmAnswer != null && llmAnswer.getAnswer() != null ? llmAnswer.getAnswer().strip() : "";
 		if (body.isEmpty()) {
 			return RagAnswer.insufficient(question,
-					"The answer could not be generated from the project knowledge base.");
+					"Jawaban tidak dapat dihasilkan dari basis pengetahuan proyek.");
 		}
 
 		var answer = new RagAnswer();
 		answer.setQuestion(question);
 		answer.setAnswer(body);
 
-		if (looksInsufficient(body)) {
+		if (!llmAnswer.isGrounded()) {
 			answer.setGrounded(false);
 			answer.setCitations(new ArrayList<>());
 			return answer;
 		}
 
 		answer.setGrounded(true);
-		answer.setCitations(buildCitations(results, body));
+		answer.setCitations(buildCitations(results, llmAnswer, body));
 		return answer;
 	}
 
-	private List<Citation> buildCitations(List<KnowledgeSearchResult> results, String body) {
+	private List<Citation> buildCitations(List<KnowledgeSearchResult> results, LlmAnswer llmAnswer, String body) {
+		var cited = reportedSourceNumbers(llmAnswer.getCitedSources(), results.size());
+		if (cited.isEmpty()) {
+			cited = markerSourceNumbers(body, results.size());
+		}
+
 		var citations = new ArrayList<Citation>();
-		var cited = citedSourceNumbers(body, results.size());
 		if (cited.isEmpty()) {
 			for (var r : results) {
 				citations.add(Citation.from(r));
@@ -186,8 +190,22 @@ public class ProjectKnowledgeRagAgent {
 		return citations;
 	}
 
+	/** Distinct, in-range 1-based source numbers the model reported in {@code citedSources}, in order. */
+	private LinkedHashSet<Integer> reportedSourceNumbers(List<Integer> citedSources, int sourceCount) {
+		var numbers = new LinkedHashSet<Integer>();
+		if (citedSources == null) {
+			return numbers;
+		}
+		for (var number : citedSources) {
+			if (number != null && number >= 1 && number <= sourceCount) {
+				numbers.add(number);
+			}
+		}
+		return numbers;
+	}
+
 	/** Distinct, in-range 1-based source numbers referenced as {@code [n]} in the answer, in first-seen order. */
-	private LinkedHashSet<Integer> citedSourceNumbers(String body, int sourceCount) {
+	private LinkedHashSet<Integer> markerSourceNumbers(String body, int sourceCount) {
 		var numbers = new LinkedHashSet<Integer>();
 		var matcher = SOURCE_MARKER.matcher(body);
 		while (matcher.find()) {
@@ -201,16 +219,6 @@ public class ProjectKnowledgeRagAgent {
 			}
 		}
 		return numbers;
-	}
-
-	private boolean looksInsufficient(String body) {
-		var lower = body.toLowerCase();
-		for (var marker : INSUFFICIENT_MARKERS) {
-			if (lower.contains(marker)) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	private String preview(String text) {
