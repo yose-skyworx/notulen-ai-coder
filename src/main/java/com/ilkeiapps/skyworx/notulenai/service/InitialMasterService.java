@@ -63,6 +63,11 @@ public class InitialMasterService {
 			log.info("seeded {} process statuses", processStatuses);
 		}
 
+		var reviewStatuses = seedCodeReviewStatuses();
+		if (reviewStatuses > 0) {
+			log.info("seeded {} code-review statuses", reviewStatuses);
+		}
+
 		var permissions = seedPermissions();
 		if (permissions > 0) {
 			log.info("seeded {} permissions", permissions);
@@ -114,6 +119,28 @@ public class InitialMasterService {
 		n += persistProcessStatus(22, "COMPLETED", "COMPLETED");
 		n += persistProcessStatus(23, "FAILED", "FAILED");
 		n += persistProcessStatus(24, "CANCELLED", "CANCELLED");
+		return n;
+	}
+
+	/**
+	 * Automated code-review lifecycle statuses, stored in the same {@code status} table under the
+	 * {@code PROCESS} discriminator ({@link StatusProcess}) and resolved by code via
+	 * {@code StatusService.getStatusProcessByCode}. Ids are manually assigned in the 30-33 range to stay
+	 * clear of the general statuses (10-12) and the document-processing statuses (20-24).
+	 * <p>
+	 * A review run or file reuses {@code PENDING}, {@code PROCESSING}, {@code COMPLETED} and
+	 * {@code FAILED} from the range above; only these four outcomes are specific to code review:
+	 * a run where some files failed is {@code COMPLETED_WITH_WARNING}, a day with no commit is
+	 * {@code NO_COMMIT}, a repository with no resolvable {@code AGENTS.md} is
+	 * {@code GUIDELINE_NOT_FOUND}, and a file deliberately not reviewed (binary, excluded path,
+	 * oversized, or inference disabled) is {@code SKIPPED} with a reason recorded alongside it.
+	 */
+	private int seedCodeReviewStatuses() {
+		var n = 0;
+		n += persistProcessStatus(30, "COMPLETED_WITH_WARNING", "COMPLETED WITH WARNING");
+		n += persistProcessStatus(31, "NO_COMMIT", "NO COMMIT");
+		n += persistProcessStatus(32, "GUIDELINE_NOT_FOUND", "GUIDELINE NOT FOUND");
+		n += persistProcessStatus(33, "SKIPPED", "SKIPPED");
 		return n;
 	}
 
