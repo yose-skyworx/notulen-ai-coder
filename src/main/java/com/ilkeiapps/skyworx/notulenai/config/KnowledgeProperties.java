@@ -65,9 +65,32 @@ public class KnowledgeProperties {
 		private int maxTopK = 20;
 		/** Minimum cosine similarity a chunk must reach to be used (set &le; -1 to disable filtering). */
 		private double minScore = 0.0;
-		/** Safety cap on the total characters of grounding context sent to the LLM. */
-		private int maxContextChars = 12000;
-		/** Sampling temperature for answer generation; low for grounded, deterministic answers. */
-		private double temperature = 0.2;
+		/**
+		 * Passages handed to the LLM, one per distinct chunk. Kept at 1: the deployed chat model
+		 * ({@code lfm-1.2b}) answers correctly from a single short passage but starts answering from the
+		 * wrong one as soon as a second, distracting passage is present. Raise only alongside a more
+		 * capable model.
+		 */
+		private int maxPassages = 1;
+		/** Character budget for one selected passage; bounds the prompt to the model's usable window. */
+		private int passageBudgetChars = 600;
+		/** Lines kept after a matched line so table rows keep their values and explanation. */
+		private int passageWindowLines = 3;
+		/**
+		 * Minimum lexical score a line must reach to become a passage. When no line in any retrieved
+		 * chunk reaches it, the answer is reported as insufficient without calling the LLM — the model
+		 * invents an answer rather than admitting the context does not contain one.
+		 */
+		private double minPassageScore = 1.0;
+		/**
+		 * Sampling temperature for answer generation. 0.0 (greedy): the deployed model's accuracy on this
+		 * task degrades noticeably as soon as sampling is enabled.
+		 */
+		private double temperature = 0.0;
+		/**
+		 * When true, the answer action logs the prompt sent to the LLM and the generated text.
+		 * Diagnostic only; verbose. No extra LLM call.
+		 */
+		private boolean debugLog = false;
 	}
 }
