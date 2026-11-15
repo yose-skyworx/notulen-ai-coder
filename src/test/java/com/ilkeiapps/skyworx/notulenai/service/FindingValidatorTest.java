@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
-import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
@@ -23,7 +22,6 @@ import com.ilkeiapps.skyworx.notulenai.service.FindingValidator.CandidateFinding
 class FindingValidatorTest {
 
 	private static final String PATH = "src/main/java/com/example/OrderService.java";
-	private static final Set<String> GUIDELINES = Set.of("AGENTS.md", "src/main/java/AGENTS.md");
 
 	private final FindingValidator validator = new FindingValidator();
 
@@ -36,16 +34,16 @@ class FindingValidatorTest {
 
 	private static CandidateFinding valid() {
 		return candidate(PATH, 42, 44, DiffSide.NEW, ReviewSeverity.HIGH, "if (order.getTotal() > 0)",
-				"src/main/java/AGENTS.md", new BigDecimal("0.90"));
+				"3.2 Transactions", new BigDecimal("0.90"));
 	}
 
 	private FindingValidationStatus check(CandidateFinding finding) {
-		return validator.validate(finding, PATH, DiffSide.NEW, 100, GUIDELINES).status();
+		return validator.validate(finding, PATH, DiffSide.NEW, 100).status();
 	}
 
 	@Test
 	void acceptsAFullyGroundedFinding() {
-		var verdict = validator.validate(valid(), PATH, DiffSide.NEW, 100, GUIDELINES);
+		var verdict = validator.validate(valid(), PATH, DiffSide.NEW, 100);
 		assertTrue(verdict.valid());
 		assertEquals(FindingValidationStatus.VALID, verdict.status());
 		assertNull(verdict.detail(), "a valid finding carries no rejection reason");
@@ -104,17 +102,21 @@ class FindingValidatorTest {
 	}
 
 	@Test
-	void rejectsACitationOfAGuidelineThatWasNeverLoaded() {
-		assertEquals(FindingValidationStatus.UNKNOWN_GUIDELINE,
-				check(candidate(PATH, 10, null, DiffSide.NEW, ReviewSeverity.LOW, "evidence",
-						"docs/AGENTS.md", new BigDecimal("0.50"))));
+	void acceptsWhateverTheModelCitesAsItsGuidelineReference() {
+		// Not validated, and deliberately so. Which guideline was applied is decided by the pipeline and
+		// recorded on the run file as role_type plus guideline_id, so provenance rests on a fact rather than
+		// on a string the model produced. Checking the citation would only reject findings for paraphrasing
+		// the standard they were actually measured against.
+		assertTrue(validator.validate(candidate(PATH, 10, null, DiffSide.NEW, ReviewSeverity.LOW, "evidence",
+				"a rule that appears nowhere in any guideline", new BigDecimal("0.50")),
+				PATH, DiffSide.NEW, 100).valid());
 	}
 
 	@Test
 	void allowsAFindingWithNoGuidelineCitation() {
 		// Not every finding is guideline-derived; requiring a citation would reject legitimate ones.
 		assertTrue(validator.validate(candidate(PATH, 10, null, DiffSide.NEW, ReviewSeverity.LOW, "evidence",
-				null, new BigDecimal("0.50")), PATH, DiffSide.NEW, 100, GUIDELINES).valid());
+				null, new BigDecimal("0.50")), PATH, DiffSide.NEW, 100).valid());
 	}
 
 	@Test
@@ -123,7 +125,7 @@ class FindingValidatorTest {
 		// the OLD side, so the honest verdict is "unverified", not "invalid".
 		var oldSide = candidate(PATH, 500, null, DiffSide.OLD, ReviewSeverity.MEDIUM, "removed code",
 				null, new BigDecimal("0.75"));
-		var verdict = validator.validate(oldSide, PATH, DiffSide.NEW, 100, GUIDELINES);
+		var verdict = validator.validate(oldSide, PATH, DiffSide.NEW, 100);
 		assertTrue(verdict.valid(), "a mismatched side must not produce a false INVALID_LINE");
 	}
 
@@ -132,15 +134,15 @@ class FindingValidatorTest {
 		var oldSide = candidate(PATH, 500, null, DiffSide.OLD, ReviewSeverity.MEDIUM, "removed code",
 				null, new BigDecimal("0.75"));
 		assertEquals(FindingValidationStatus.INVALID_LINE,
-				validator.validate(oldSide, PATH, DiffSide.OLD, 100, GUIDELINES).status());
+				validator.validate(oldSide, PATH, DiffSide.OLD, 100).status());
 	}
 
 	@Test
 	void reportsTheMostFundamentalProblemFirst() {
 		// Wrong file AND an impossible line AND no evidence: the file mismatch is the root problem.
-		var wrong = candidate("Other.java", 9999, null, DiffSide.NEW, null, "", "nope/AGENTS.md",
+		var wrong = candidate("Other.java", 9999, null, DiffSide.NEW, null, "", "3.2 Transactions",
 				new BigDecimal("9.00"));
-		var verdict = validator.validate(wrong, PATH, DiffSide.NEW, 100, GUIDELINES);
+		var verdict = validator.validate(wrong, PATH, DiffSide.NEW, 100);
 		assertEquals(FindingValidationStatus.OUT_OF_FILE, verdict.status());
 		assertNotNull(verdict.detail());
 	}
@@ -149,7 +151,7 @@ class FindingValidatorTest {
 	void boundsTheRejectionDetail() {
 		var longPath = "x".repeat(900) + ".java";
 		var verdict = validator.validate(candidate(longPath, 1, null, DiffSide.NEW, ReviewSeverity.LOW,
-				"evidence", null, new BigDecimal("0.5")), PATH, DiffSide.NEW, 100, GUIDELINES);
+				"evidence", null, new BigDecimal("0.5")), PATH, DiffSide.NEW, 100);
 		assertEquals(FindingValidationStatus.OUT_OF_FILE, verdict.status());
 		assertTrue(verdict.detail().length() <= 512, "detail must fit the varchar(512) column");
 	}

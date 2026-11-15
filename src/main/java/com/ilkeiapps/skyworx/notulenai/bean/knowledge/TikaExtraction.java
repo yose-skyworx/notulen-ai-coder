@@ -3,9 +3,10 @@ package com.ilkeiapps.skyworx.notulenai.bean.knowledge;
 import java.util.Map;
 
 /**
- * Raw result of an Apache Tika Server extraction: the detected title and content type, the Markdown
- * body Tika produced (structure-preserving: ATX headings, paragraphs, GFM tables, lists), and the full
- * metadata map. Internal processing holder, not a REST DTO.
+ * Result of a document conversion: the Markdown body the conversion service produced
+ * (structure-preserving: ATX headings, paragraphs, GFM tables, lists) and the metadata it reported
+ * (detected {@code format}, {@code page_count}, and the {@code ocr_pages} that needed OCR).
+ * Internal processing holder, not a REST DTO.
  */
-public record TikaExtraction(String title, String contentType, String content, Map<String, String> metadata) {
+public record TikaExtraction(String content, Map<String, Object> metadata) {
 }

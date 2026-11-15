@@ -1,91 +1,109 @@
 package com.ilkeiapps.skyworx.notulenai.service;
 
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.MultipartBodyBuilder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.TikaExtraction;
+import com.ilkeiapps.skyworx.notulenai.config.TikaProperties;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Apache Tika Server integration. Sends the document bytes to {@code PUT /rmeta/md}, which returns a
- * JSON array of metadata objects (one per embedded document); the first object is the main document,
- * whose {@code tk:content} field holds structure-preserving Markdown (ATX headings, paragraphs, GFM
- * tables, lists). The bytes are streamed to Tika rather than parsed in-process.
+ * Document-conversion integration (the AnyDoc + PaddleOCR service behind {@code tika.server.url}).
+ * Sends the document bytes as a multipart {@code POST /v1/convert} with {@code output=json}, which
+ * returns {@code {"markdown": "...", "metadata": {...}}}: structure-preserving Markdown (ATX headings,
+ * paragraphs, GFM tables, lists) plus what the service detected. The bytes are streamed to the service
+ * rather than parsed in-process.
+ * <p>
+ * The service identifies the format by sniffing the bytes, so no content type or file extension needs
+ * to be supplied; an ambiguous format would need an extra {@code format} part, which nothing uploaded
+ * here requires. {@code ocr=auto} leaves the decision to the service, which OCRs only the pages that
+ * have no text layer and lists them in {@code metadata.ocr_pages}.
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TikaExtractionService {
 
-	private static final String TIKA_CONTENT_KEY = "tk:content";
+	/** The format is sniffed from the bytes, so the part's filename carries no information. */
+	private static final String FILE_PART_NAME = "document";
 
 	/**
-	 * Local Jackson (2.x) mapper for reading Tika's JSON array. Spring Boot 4 auto-configures a
+	 * Local Jackson (2.x) mapper for reading the conversion response. Spring Boot 4 auto-configures a
 	 * Jackson 3 mapper, so no {@code com.fasterxml.jackson.databind.ObjectMapper} bean exists to
 	 * inject; a private instance avoids coupling to the framework's JSON stack.
 	 */
 	private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
 	private final @Qualifier("tikaRestClient") RestClient tikaRestClient;
+	private final TikaProperties properties;
 
-	public TikaExtraction extract(byte[] data, String contentType) {
+	public TikaExtraction extract(byte[] data) {
 		var start = System.currentTimeMillis();
-		log.info("tika: PUT /rmeta/md with {} bytes (contentType={})", data.length, contentType);
-		String body = tikaRestClient.put()
-				.uri("/rmeta/md")
+		log.info("convert: POST /v1/convert with {} bytes", data.length);
+
+		var parts = new MultipartBodyBuilder();
+		parts.part("file", data, MediaType.APPLICATION_OCTET_STREAM).filename(FILE_PART_NAME);
+		parts.part("ocr", "auto");
+		parts.part("output", "json");
+
+		String body = tikaRestClient.post()
+				.uri("/v1/convert")
+				.header(HttpHeaders.AUTHORIZATION, "Bearer " + requireToken())
 				.accept(MediaType.APPLICATION_JSON)
-				.contentType(contentType != null ? MediaType.parseMediaType(contentType) : MediaType.APPLICATION_OCTET_STREAM)
-				.body(data)
+				.contentType(MediaType.MULTIPART_FORM_DATA)
+				.body(parts.build())
 				.retrieve()
 				.body(String.class);
 
-		List<Map<String, Object>> parsed;
-		try {
-			parsed = OBJECT_MAPPER.readValue(body, new TypeReference<List<Map<String, Object>>>() {});
-		} catch (Exception e) {
-			throw new IllegalStateException("Unable to parse Tika Server response", e);
-		}
-		if (parsed == null || parsed.isEmpty()) {
-			log.warn("tika: empty response in {} ms", System.currentTimeMillis() - start);
-			return new TikaExtraction(null, contentType, "", Map.of());
+		var root = readTree(body);
+		if (!root.path("markdown").isTextual()) {
+			throw new IllegalStateException("Document conversion returned no markdown");
 		}
 
-		var main = parsed.getFirst();
-		log.info("tika: parsed {} metadata object(s), content length={} in {} ms", parsed.size(),
-				main.get(TIKA_CONTENT_KEY) == null ? 0 : String.valueOf(main.get(TIKA_CONTENT_KEY)).length(),
-				System.currentTimeMillis() - start);
-		var content = asString(main.get(TIKA_CONTENT_KEY));
-		var title = asString(main.get("dc:title"));
-		var detectedType = asString(main.get("Content-Type"));
+		var content = root.path("markdown").asText();
+		var metadataNode = root.path("metadata");
+		Map<String, Object> metadata = metadataNode.isObject()
+				? OBJECT_MAPPER.convertValue(metadataNode, new TypeReference<Map<String, Object>>() {})
+				: Map.of();
 
-		var metadata = new HashMap<String, String>();
-		for (var entry : main.entrySet()) {
-			if (TIKA_CONTENT_KEY.equals(entry.getKey())) {
-				continue;
-			}
-			metadata.put(entry.getKey(), asString(entry.getValue()));
-		}
-		return new TikaExtraction(title, detectedType != null ? detectedType : contentType,
-				content != null ? content : "", metadata);
+		log.info("convert: markdown length={} in {} ms, metadata={}", content.length(),
+				System.currentTimeMillis() - start, metadata);
+		return new TikaExtraction(content, metadata);
 	}
 
-	private String asString(Object value) {
-		if (value == null) {
-			return null;
+	private JsonNode readTree(String body) {
+		if (body == null || body.isBlank()) {
+			throw new IllegalStateException("Document conversion returned an empty response");
 		}
-		if (value instanceof List<?> list) {
-			return list.isEmpty() ? null : String.valueOf(list.getFirst());
+		try {
+			return OBJECT_MAPPER.readTree(body);
+		} catch (Exception e) {
+			throw new IllegalStateException("Unable to parse the document conversion response", e);
 		}
-		return String.valueOf(value);
+	}
+
+	/**
+	 * Read once per request rather than cached, so rotating {@code TIKA_SERVER_TOKEN} and restarting
+	 * picks the new value up and a blank value fails before any request leaves the process. The message
+	 * names the environment variable but never the token.
+	 */
+	private String requireToken() {
+		var configured = properties.getToken();
+		if (configured == null || configured.isBlank()) {
+			throw new IllegalStateException(
+					"tika.server.token is not set; export TIKA_SERVER_TOKEN before processing a document");
+		}
+		return configured.trim();
 	}
 }

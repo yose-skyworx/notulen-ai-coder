@@ -1,30 +1,27 @@
 package com.ilkeiapps.skyworx.notulenai.service;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import org.springframework.stereotype.Service;
 
 import com.ilkeiapps.skyworx.notulenai.config.CodeReviewProperties;
-import com.ilkeiapps.skyworx.notulenai.service.AgentsGuidelineResolver.Guideline;
 import com.ilkeiapps.skyworx.notulenai.utility.SecretRedactor;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Assembles the text one file review is built from — the guidelines that govern it, its diff, and a
+ * Assembles the text one file review is built from — the guideline that governs it, its diff, and a
  * slice of surrounding source — inside the configured token budget.
  * <p>
  * Two rules drive the implementation:
  * <ol>
- * <li><b>Redact before truncating.</b> Cutting first can split a credential in half, and the surviving
- * half is still recognisable as one. Redacting first means truncation only ever removes text that is
- * already safe to send.</li>
- * <li><b>Only the governing guidelines.</b> An {@code AGENTS.md} applies to its own directory and
- * everything below it, so a commit touching both {@code backend/} and {@code frontend/} must not send
- * one area's conventions as context for the other. Passing unrelated rules wastes budget and invites
- * findings that cite a rule the file was never under.</li>
+ * <li><b>Redact repository text before truncating it.</b> Cutting first can split a credential in half,
+ * and the surviving half is still recognisable as one. Redacting first means truncation only ever
+ * removes text that is already safe to send. Only the diff and the source snapshot are repository text;
+ * the guideline is ours — see {@link #build}.</li>
+ * <li><b>Only the governing guideline.</b> The caller passes the text of the one active guideline the
+ * file's review role selected — see {@code CodeReviewGuidelineService} — not a library. A service is
+ * judged against the service standard and nothing else, so unrelated rules never consume budget and
+ * never invite a finding that cites a rule this file was never under.</li>
  * </ol>
  * <p>
  * The token estimate is deliberately crude — four characters per token. It is a budget guard, not a
@@ -49,19 +46,23 @@ public class ReviewContextBuilder {
 	}
 
 	/**
-	 * @param filePath   the file under review, used to select which guidelines govern it
-	 * @param guidelines every guideline resolved for the run, in root-first order
-	 * @param diff       the file's unified diff from the commit
-	 * @param source     the file's full contents at the reviewed commit, or null when unavailable
+	 * @param filePath      the file under review, named in the log line when the budget is exceeded
+	 * @param guidelineText the content of the active guideline for this file's role
+	 * @param diff          the file's unified diff from the commit, or null for a whole-branch review
+	 * @param source        the file's full contents at the reviewed commit, or null when unavailable
 	 */
-	public ReviewContext build(String filePath, List<Guideline> guidelines, String diff, String source) {
+	public ReviewContext build(String filePath, String guidelineText, String diff, String source) {
 		var budget = properties.getContext();
 
-		var guidelineText = redactAndFit(joinGoverning(filePath, guidelines), budget.getMaxGuidelineTokens());
+		// Not redacted, unlike the two sections below. The guideline is authored in this application and
+		// read from its own database, not fetched from the repository under review, so there is no
+		// accidental secret to strip — and a standard that documents what a credential looks like is
+		// exactly what SecretRedactor would mangle.
+		var guideline = truncateToTokens(guidelineText, budget.getMaxGuidelineTokens());
 		var diffText = redactAndFit(diff, budget.getMaxDiffTokens());
 		var sourceText = redactAndFit(source, budget.getMaxSourceContextTokens());
 
-		var total = estimateTokens(guidelineText) + estimateTokens(diffText) + estimateTokens(sourceText);
+		var total = estimateTokens(guideline) + estimateTokens(diffText) + estimateTokens(sourceText);
 		var ceiling = budget.getMaxInputTokens();
 		if (total > ceiling) {
 			// The per-section budgets are individually configurable, so their sum can exceed the overall
@@ -70,52 +71,19 @@ public class ReviewContextBuilder {
 			log.warn("context for {}: {} estimated tokens exceed the {} ceiling, trimming", filePath, total, ceiling);
 
 			sourceText = trimBy(sourceText, total - ceiling);
-			total = estimateTokens(guidelineText) + estimateTokens(diffText) + estimateTokens(sourceText);
+			total = estimateTokens(guideline) + estimateTokens(diffText) + estimateTokens(sourceText);
 
 			if (total > ceiling) {
 				diffText = trimBy(diffText, total - ceiling);
-				total = estimateTokens(guidelineText) + estimateTokens(diffText) + estimateTokens(sourceText);
+				total = estimateTokens(guideline) + estimateTokens(diffText) + estimateTokens(sourceText);
 			}
 			if (total > ceiling) {
-				guidelineText = trimBy(guidelineText, total - ceiling);
-				total = estimateTokens(guidelineText) + estimateTokens(diffText) + estimateTokens(sourceText);
+				guideline = trimBy(guideline, total - ceiling);
+				total = estimateTokens(guideline) + estimateTokens(diffText) + estimateTokens(sourceText);
 			}
 		}
 
-		return new ReviewContext(guidelineText, diffText, sourceText, total);
-	}
-
-	/**
-	 * Concatenates the guidelines that govern {@code filePath}, keeping the incoming root-first order so
-	 * general rules precede the specific ones. A guideline governs a file when the file sits in the
-	 * guideline's directory or below it; the root guideline's directory is empty and so governs all.
-	 */
-	private String joinGoverning(String filePath, List<Guideline> guidelines) {
-		if (guidelines == null || guidelines.isEmpty() || filePath == null) {
-			return "";
-		}
-
-		var governing = new ArrayList<Guideline>();
-		for (Guideline guideline : guidelines) {
-			if (filePath.startsWith(directoryOf(guideline.path()))) {
-				governing.add(guideline);
-			}
-		}
-		if (governing.isEmpty()) {
-			return "";
-		}
-
-		var joined = new StringBuilder();
-		for (Guideline guideline : governing) {
-			joined.append("### ").append(guideline.path()).append('\n')
-					.append(guideline.content().strip()).append("\n\n");
-		}
-		return joined.toString().strip();
-	}
-
-	private static String directoryOf(String guidelinePath) {
-		var slash = guidelinePath.lastIndexOf('/');
-		return slash < 0 ? "" : guidelinePath.substring(0, slash + 1);
+		return new ReviewContext(guideline, diffText, sourceText, total);
 	}
 
 	private String redactAndFit(String text, int maxTokens) {

@@ -8,11 +8,13 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import org.springframework.stereotype.Service;
 import org.springframework.util.AntPathMatcher;
 
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
+import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
 import com.ilkeiapps.skyworx.notulenai.config.CodeReviewProperties;
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.BranchFile;
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.CommitFile;
@@ -33,9 +35,9 @@ import lombok.extern.slf4j.Slf4j;
  * <p>
  * They do not gate on the same things. A commit's file list is already short and already interesting —
  * someone changed those files — so only exclusion and patch presence are checked here, and
- * {@link JavaRoleFilter#isExamined} settles the role question later on content the pipeline has fetched
- * anyway. A branch's listing is the entire repository, so {@link JavaRoleFilter#isTargetByPath} gates it up
- * front, from the path alone.
+ * {@link ReviewRoleResolver#roleOf} settles the role question later on content the pipeline has fetched
+ * anyway. A branch's listing is the entire repository, so {@link ReviewRoleResolver#roleOfPath} gates it
+ * up front, from the path alone.
  * <p>
  * Every rejected file is recorded with a {@code skipReason} rather than dropped. A run that silently
  * omitted half a commit would look identical to a run that reviewed everything and found nothing, and
@@ -63,6 +65,14 @@ public class ChangedFileClassifier {
 	 * strategy produced it.
 	 */
 	public static final String SKIP_NOT_TARGET_ROLE = "NOT_A_TARGET_ROLE";
+	/**
+	 * The file's role has no active guideline version, so there is no standard to review it against.
+	 * Distinct from {@link #SKIP_NOT_TARGET_ROLE}: that says the file is not the kind of thing this module
+	 * reviews, this says it is, and the library is missing the rules for it. A whole-branch run records it
+	 * during classification so the file ceiling is not spent on files that cannot be reviewed; a commit run
+	 * records the same token later, in {@code reviewOneFile}, once the role is settled.
+	 */
+	public static final String SKIP_NO_GUIDELINE = "NO_GUIDELINE";
 
 	/** Extension to language. Deliberately small; an unknown extension yields null, not a guess. */
 	private static final Map<String, String> LANGUAGES = Map.ofEntries(
@@ -104,7 +114,7 @@ public class ChangedFileClassifier {
 			Map.entry("dockerfile", "Dockerfile"));
 
 	private final CodeReviewProperties properties;
-	private final JavaRoleFilter javaRoleFilter;
+	private final ReviewRoleResolver roleResolver;
 
 	/**
 	 * {@code AntPathMatcher} is safe to share: it is immutable once constructed and caches compiled
@@ -115,13 +125,18 @@ public class ChangedFileClassifier {
 	/**
 	 * One file and its review decision.
 	 *
+	 * @param role        the review role the path resolved to, or null. Only {@link #classifyBranchFiles}
+	 *                    fills it, because only a branch listing has to decide eligibility before fetching
+	 *                    anything. {@link #classify} leaves it null and {@code reviewOneFile} settles the
+	 *                    role from the content it fetched anyway — the annotation tier needs it, and a
+	 *                    commit's file list is short enough that deferring costs nothing.
 	 * @param skipReason  null when the file should be reviewed; a stable token explaining why not
 	 *                    otherwise, persisted to {@code code_review_run_files.skip_reason}
 	 * @param contentHash identifies the content a review covered, so a re-run can tell an unchanged file
 	 *                    from a changed one. SHA-256 of the patch for a commit-based run, the git blob SHA
 	 *                    for a whole-branch run. Never null.
 	 */
-	public record ClassifiedFile(CommitFile file, FileChangeStatus changeStatus, String language,
+	public record ClassifiedFile(CommitFile file, FileChangeStatus changeStatus, String language, ReviewRoleType role,
 			String skipReason, String contentHash) {
 
 		public boolean reviewable() {
@@ -156,8 +171,8 @@ public class ChangedFileClassifier {
 			if (skipReason != null) {
 				skipped++;
 			}
-			classified.add(new ClassifiedFile(file, changeStatusOf(file.status()), languageOf(path), skipReason,
-					sha256Hex(file.patch() == null ? "" : file.patch())));
+			classified.add(new ClassifiedFile(file, changeStatusOf(file.status()), languageOf(path), null,
+					skipReason, sha256Hex(file.patch() == null ? "" : file.patch())));
 		}
 
 		log.info("classifier: {} file(s), {} reviewable, {} skipped", files.size(), files.size() - skipped, skipped);
@@ -167,8 +182,8 @@ public class ChangedFileClassifier {
 	/**
 	 * Classifies every file in a branch, for a run that reviews the branch as it stands rather than one
 	 * commit's diff. There is no patch whose absence could be a reason to skip — the file's own content is
-	 * fetched and read later regardless — so exclusion, the target-role whitelist and the file ceiling
-	 * apply, in that order.
+	 * fetched and read later regardless — so exclusion, the role whitelist, the guideline check and the
+	 * file ceiling apply, in that order.
 	 * <p>
 	 * {@code changeStatus} is {@code MODIFIED} for all of them, because the column is {@code NOT NULL} and
 	 * a branch listing describes no change at all. {@code MODIFIED} is the value whose handling is correct
@@ -179,30 +194,42 @@ public class ChangedFileClassifier {
 	 * has a meaning without a diff to compare against, and inventing a zero would report "this file changed
 	 * by nothing" where the truth is "nothing was compared".
 	 * <p>
-	 * The whitelist is {@link JavaRoleFilter#isTargetByPath}, and running it here rather than after the
-	 * fetch is what makes the ceiling mean something. Both decisions look like the same skip reason in the
+	 * The whitelist is {@link ReviewRoleResolver#roleOfPath}, and running it here rather than after the
+	 * fetch is what makes the ceiling mean something. Both decisions look like a skip reason in the
 	 * response, but ordering them the other way round would spend the whole budget on whatever git lists
 	 * first — {@code .github/}, root configs, {@code docs/} — and reject all of it, while the service and
 	 * controller files further down the tree were never reached. A branch review that reported 200 files
 	 * covered and 200 skipped would look exactly like one that reviewed the code and found nothing.
 	 * <p>
-	 * {@code code-review.branch-review.max-files} is applied last, to the files that survived exclusion and
-	 * the whitelist, because the ceiling is a review-eligibility decision like any other and produces a skip
-	 * reason like any other. Only the branch strategy needs it: a commit's file list is bounded by what one
-	 * commit touched, while a branch's is bounded by the size of the repository, and each examinable file
-	 * costs one content fetch and one model call at a file concurrency of one. The overflow is marked, never
+	 * The guideline check sits between the whitelist and the ceiling for the same reason: a role with no
+	 * active version cannot be reviewed at all, so spending ceiling on it would crowd out a role that can
+	 * be. The role is still recorded on the row, because "this is a service and we have no service
+	 * standard" is a more useful thing to report than "skipped".
+	 * <p>
+	 * {@code code-review.branch-review.max-files} is applied last, to the files that survived all three
+	 * gates, because the ceiling is a review-eligibility decision like any other and produces a skip reason
+	 * like any other. Only the branch strategy needs it: a commit's file list is bounded by what one commit
+	 * touched, while a branch's is bounded by the size of the repository, and each examinable file costs
+	 * one content fetch and one model call at a file concurrency of one. The overflow is marked, never
 	 * dropped, so the run still accounts for every file the branch holds.
+	 *
+	 * @param rolesWithGuideline the roles that have an active guideline version in the library, i.e. the
+	 *                           key set of {@code CodeReviewGuidelineService#loadActive()}. Passed as a set
+	 *                           of roles rather than the map so this class stays unaware of guideline
+	 *                           entities; it only has to know whether a role can be reviewed.
 	 */
-	public List<ClassifiedFile> classifyBranchFiles(List<BranchFile> files) {
+	public List<ClassifiedFile> classifyBranchFiles(List<BranchFile> files, Set<ReviewRoleType> rolesWithGuideline) {
 		if (files == null || files.isEmpty()) {
 			return List.of();
 		}
 
 		var patterns = properties.getExclusions().getPatterns();
 		var maxFiles = properties.getBranchReview().getMaxFiles();
+		var covered = rolesWithGuideline == null ? Set.<ReviewRoleType>of() : rolesWithGuideline;
 		var classified = new ArrayList<ClassifiedFile>(files.size());
 		var excluded = 0;
 		var notTarget = 0;
+		var noGuideline = 0;
 		var examinable = 0;
 		var overLimit = 0;
 
@@ -214,13 +241,20 @@ public class ChangedFileClassifier {
 			var blobSha = file.blobSha();
 			var contentHash = blobSha == null || blobSha.isBlank() ? sha256Hex(path) : blobSha;
 
+			// Resolved even for a file that is about to be excluded: the role is a fact about the path, and
+			// recording it on an excluded row costs one round of pattern matching.
+			var role = roleResolver.roleOfPath(path);
+
 			String skipReason = null;
 			if (isExcluded(path, patterns)) {
 				skipReason = SKIP_EXCLUDED;
 				excluded++;
-			} else if (!javaRoleFilter.isTargetByPath(path)) {
+			} else if (role == null) {
 				skipReason = SKIP_NOT_TARGET_ROLE;
 				notTarget++;
+			} else if (!covered.contains(role)) {
+				skipReason = SKIP_NO_GUIDELINE;
+				noGuideline++;
 			} else if (maxFiles > 0 && examinable == maxFiles) {
 				// The first maxFiles examinable files in tree order are kept. Arbitrary, but stable: git's
 				// tree order does not change between runs, so re-triggering resumes the same run and
@@ -232,11 +266,16 @@ public class ChangedFileClassifier {
 			}
 
 			classified.add(new ClassifiedFile(new CommitFile(path, null, null, null, null, null),
-					FileChangeStatus.MODIFIED, languageOf(path), skipReason, contentHash));
+					FileChangeStatus.MODIFIED, languageOf(path), role, skipReason, contentHash));
 		}
 
 		log.info("branch classifier: {} file(s), {} examinable, {} excluded, {} outside the target roles, "
-				+ "{} over the file limit", files.size(), examinable, excluded, notTarget, overLimit);
+				+ "{} with no active guideline, {} over the file limit",
+				files.size(), examinable, excluded, notTarget, noGuideline, overLimit);
+		if (noGuideline > 0) {
+			log.warn("branch classifier: {} file(s) play a role with no active guideline version and are marked {}",
+					noGuideline, SKIP_NO_GUIDELINE);
+		}
 		if (overLimit > 0) {
 			log.warn("branch classifier: {} file(s) exceeded max-files={} and are marked {}",
 					overLimit, maxFiles, SKIP_BRANCH_FILE_LIMIT);

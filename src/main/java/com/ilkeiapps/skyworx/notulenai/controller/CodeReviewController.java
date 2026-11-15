@@ -119,7 +119,7 @@ public class CodeReviewController {
 	 * {@code skipReason}, so the counts on the run can be reconciled against actual paths instead of being
 	 * taken on trust. A partial failure is reported as data rather than as an error: {@code status=true}
 	 * means at least one run executed, and each entry says whether that run {@code COMPLETED},
-	 * {@code COMPLETED_WITH_WARNING}, {@code NO_COMMIT}, {@code GUIDELINE_NOT_FOUND}, or {@code FAILED}.
+	 * {@code COMPLETED_WITH_WARNING}, {@code NO_COMMIT}, or {@code FAILED}.
 	 * Re-triggering the same project on the same day resumes the existing runs rather than duplicating
 	 * them, so a retry after a partial failure only redoes the work that is still outstanding — and a
 	 * wrong date costs nothing to correct by triggering again with the right one.

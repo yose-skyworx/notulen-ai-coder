@@ -9,12 +9,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.EnumSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.Test;
 
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
+import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
 import com.ilkeiapps.skyworx.notulenai.config.CodeReviewProperties;
 import com.ilkeiapps.skyworx.notulenai.service.ChangedFileClassifier.ClassifiedFile;
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.BranchFile;
@@ -28,21 +31,32 @@ import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.CommitFile;
  * Both entry points are covered — a commit's changed files and a branch's whole listing — because they
  * produce the same shape and the rest of the pipeline cannot tell them apart. They do not gate on the
  * same things, and the asymmetry is deliberate, so it is pinned from both sides: a branch listing is
- * narrowed to the target roles from the path alone, while a commit's file list is not narrowed here at
- * all.
+ * narrowed to the roles that have a guideline, from the path alone, while a commit's file list is not
+ * narrowed here at all.
+ * <p>
+ * The guideline coverage is passed in as a set of roles rather than read from a fixture library, because
+ * the classifier is not allowed to know what a guideline is: whether a role can be reviewed is the only
+ * thing it needs, and the caller derives that from {@code CodeReviewGuidelineService#loadActive()}.
  */
 class ChangedFileClassifierTest {
 
 	private final CodeReviewProperties properties = new CodeReviewProperties();
 	private final ChangedFileClassifier classifier = newClassifier(properties);
 
+	/** Every role has an active guideline, so the coverage gate lets anything with a role through. */
+	private static final Set<ReviewRoleType> ALL_ROLES = EnumSet.allOf(ReviewRoleType.class);
+
 	/** Both beans read the same properties, so a test that edits one must rebuild the pair together. */
 	private static ChangedFileClassifier newClassifier(CodeReviewProperties properties) {
-		return new ChangedFileClassifier(properties, new JavaRoleFilter(properties));
+		return new ChangedFileClassifier(properties, new ReviewRoleResolver(properties));
 	}
 
 	private static CommitFile file(String path, String status, String patch) {
 		return new CommitFile(path, null, status, 10, 2, patch);
+	}
+
+	private static BranchFile branchFile(String path) {
+		return new BranchFile(path, "abc123", 1L);
 	}
 
 	private ClassifiedFile classifyOne(String path, String status, String patch) {
@@ -50,7 +64,19 @@ class ChangedFileClassifierTest {
 	}
 
 	private ClassifiedFile classifyOneBranchFile(String path, String blobSha) {
-		return classifier.classifyBranchFiles(List.of(new BranchFile(path, blobSha, 512L))).getFirst();
+		return classifyOneBranchFile(path, blobSha, ALL_ROLES);
+	}
+
+	private ClassifiedFile classifyOneBranchFile(String path, String blobSha, Set<ReviewRoleType> covered) {
+		return classifyBranch(List.of(new BranchFile(path, blobSha, 512L)), covered).getFirst();
+	}
+
+	private List<ClassifiedFile> classifyBranch(List<BranchFile> files) {
+		return classifyBranch(files, ALL_ROLES);
+	}
+
+	private List<ClassifiedFile> classifyBranch(List<BranchFile> files, Set<ReviewRoleType> covered) {
+		return classifier.classifyBranchFiles(files, covered);
 	}
 
 	private static String sha256(String text) throws Exception {
@@ -156,6 +182,15 @@ class ChangedFileClassifierTest {
 				.reviewable());
 	}
 
+	@Test
+	void leavesTheRoleNullForACommitFileBecauseItIsSettledLater() {
+		// classify has no content to consult, so a commit run defers the role to reviewOneFile, where the
+		// annotation tier can decide a file whose path matched no pattern. Resolving it here from the path
+		// alone would freeze in the false negative that the deferred lookup exists to avoid.
+		assertNull(classifyOne("src/main/java/com/x/OrderService.java", "modified", "@@ p @@").role());
+		assertNull(classifyOne("README.md", "modified", "@@ p @@").role());
+	}
+
 	// ------------------------------------------------------------------ content hash
 
 	@Test
@@ -244,23 +279,23 @@ class ChangedFileClassifierTest {
 		// The whole-branch file ceiling keeps the first N in this order, so a stable listing is what makes
 		// re-triggering resume the same slice rather than an arbitrary different one.
 		var paths = List.of("z/ZService.java", "a/AService.java", "m/MService.java");
-		var files = paths.stream().map(path -> new BranchFile(path, "abc", 1L)).toList();
+		var files = paths.stream().map(ChangedFileClassifierTest::branchFile).toList();
 
-		var classified = classifier.classifyBranchFiles(files);
+		var classified = classifyBranch(files);
 
 		assertEquals(paths, classified.stream().map(entry -> entry.file().path()).toList());
 	}
 
 	@Test
 	void handlesAnEmptyBranch() {
-		assertTrue(classifier.classifyBranchFiles(List.of()).isEmpty());
-		assertTrue(classifier.classifyBranchFiles(null).isEmpty());
+		assertTrue(classifyBranch(List.of()).isEmpty());
+		assertTrue(classifyBranch(null).isEmpty());
 	}
 
 	@Test
 	void neverLeavesAContentHashNull() {
-		for (ClassifiedFile result : classifier.classifyBranchFiles(List.of(
-				new BranchFile("a/A.java", "abc123", 1L),
+		for (ClassifiedFile result : classifyBranch(List.of(
+				branchFile("a/AService.java"),
 				new BranchFile("web/node_modules/x.js", null, 1L),
 				new BranchFile("Makefile", "", 1L)))) {
 			assertNotNull(result.contentHash());
@@ -290,6 +325,19 @@ class ChangedFileClassifierTest {
 	}
 
 	@Test
+	void reportsTheRoleItResolvedAlongsideTheVerdict() {
+		// The role is what selects the guideline, so persisting it on every branch row — including a
+		// rejected one — is what makes "skipped" countable per role instead of one undifferentiated pile.
+		assertEquals(ReviewRoleType.SERVICE, classifyOneBranchFile("src/main/java/com/x/OrderService.java", "abc")
+				.role());
+		assertEquals(ReviewRoleType.CONTROLLER,
+				classifyOneBranchFile("src/main/java/com/x/OrderController.java", "abc").role());
+		assertEquals(ReviewRoleType.ENTITY,
+				classifyOneBranchFile("src/main/java/com/x/entity/Order.java", "abc").role());
+		assertNull(classifyOneBranchFile("README.md", "abc").role());
+	}
+
+	@Test
 	void examinesEveryFileUnderARoleDirectoryWhateverItsLanguage() {
 		// The directory tier is not gated on .java: "all files in the service folder" means all of them, so a
 		// helper or a query that lives beside the services is reviewed too.
@@ -308,7 +356,8 @@ class ChangedFileClassifierTest {
 		// fetch every Java file that missed both pattern tiers to find out, which is the cost the ceiling
 		// exists to prevent.
 		assertEquals(ChangedFileClassifier.SKIP_NOT_TARGET_ROLE, classifyOneBranchFile(path, "abc").skipReason());
-		assertTrue(new JavaRoleFilter(properties).isExamined(path, "@Service public class OrderProcessor { }"));
+		assertEquals(ReviewRoleType.SERVICE, new ReviewRoleResolver(properties).roleOf(path,
+				"@Service public class OrderProcessor { }"));
 	}
 
 	@Test
@@ -319,22 +368,10 @@ class ChangedFileClassifierTest {
 	}
 
 	@Test
-	void examinesEveryBranchFileWhenTheRoleFilterIsDisabled() {
-		properties.getJavaFilter().setEnabled(false);
-
-		var classified = newClassifier(properties).classifyBranchFiles(List.of(
-				new BranchFile("README.md", "abc", 1L),
-				new BranchFile("web/src/app.component.ts", "abc", 1L),
-				new BranchFile("src/main/java/com/x/OrderProcessor.java", "abc", 1L)));
-
-		assertTrue(classified.stream().allMatch(ClassifiedFile::reviewable));
-	}
-
-	@Test
 	void leavesTheRoleWhitelistAloneForACommitBasedRun() {
 		// A commit's file list is already short and already interesting — someone changed those files — so
-		// classify must not narrow it. The role question for a commit is settled later by isExamined, on
-		// content that has been fetched anyway, and that keeps the annotation tier available.
+		// classify must not narrow it. The role question for a commit is settled later by roleOf, on content
+		// that has been fetched anyway, and that keeps the annotation tier available.
 		assertTrue(classifyOne("README.md", "modified", "@@ p @@").reviewable());
 		assertTrue(classifyOne("db/migrations/V1__init.sql", "added", "@@ p @@").reviewable());
 		assertTrue(classifyOne("src/main/java/com/x/OrderProcessor.java", "modified", "@@ p @@").reviewable());
@@ -344,7 +381,7 @@ class ChangedFileClassifierTest {
 	void aFileOutsideTheTargetRolesCostsNothingAgainstTheCeiling() {
 		properties.getBranchReview().setMaxFiles(2);
 
-		var classified = classifier.classifyBranchFiles(List.of(
+		var classified = classifyBranch(List.of(
 				branchFile("README.md"), branchFile("a/OneService.java"),
 				branchFile("web/src/app.component.ts"), branchFile("b/TwoService.java"),
 				branchFile("c/ThreeService.java")));
@@ -358,17 +395,104 @@ class ChangedFileClassifierTest {
 		assertEquals(ChangedFileClassifier.SKIP_BRANCH_FILE_LIMIT, classified.get(4).skipReason());
 	}
 
-	// ------------------------------------------------------------------ whole-branch file ceiling
+	// ------------------------------------------------------------------ whole-branch guideline coverage
 
-	private static BranchFile branchFile(String path) {
-		return new BranchFile(path, "abc123", 1L);
+	@Test
+	void skipsARoleTheLibraryHasNoActiveGuidelineFor() {
+		// Distinct from NOT_A_TARGET_ROLE: this file is exactly the kind of thing the module reviews, and
+		// the library is missing the rules for it. Conflating the two would report a gap in our own
+		// guideline library as though the repository had done something unexpected.
+		var covered = EnumSet.of(ReviewRoleType.SERVICE, ReviewRoleType.CONTROLLER);
+
+		assertEquals(ChangedFileClassifier.SKIP_NO_GUIDELINE,
+				classifyOneBranchFile("src/main/java/com/x/OrderEntity.java", "abc", covered).skipReason());
+		assertEquals(ReviewRoleType.ENTITY,
+				classifyOneBranchFile("src/main/java/com/x/OrderEntity.java", "abc", covered).role());
+		assertTrue(classifyOneBranchFile("src/main/java/com/x/OrderService.java", "abc", covered).reviewable());
+		assertTrue(classifyOneBranchFile("src/main/java/com/x/OrderController.java", "abc", covered).reviewable());
 	}
+
+	@Test
+	void keepsTheGuidelineCheckAfterTheRoleCheck() {
+		// A file with no role has no guideline to be missing. Reporting NO_GUIDELINE here would blame the
+		// library for a README, and would make the skip counts lie about how much of the repository is
+		// actually in scope.
+		assertEquals(ChangedFileClassifier.SKIP_NOT_TARGET_ROLE,
+				classifyOneBranchFile("README.md", "abc", Set.of()).skipReason());
+	}
+
+	@Test
+	void keepsExclusionAheadOfTheGuidelineCheck() {
+		assertEquals(ChangedFileClassifier.SKIP_EXCLUDED,
+				classifyOneBranchFile("web/node_modules/react/index.js", "abc", Set.of()).skipReason());
+	}
+
+	@Test
+	void skipsEveryBranchFileWhenTheLibraryHasNoActiveVersionAtAll() {
+		// An empty library is not a reason to fail the run: every file is accounted for with a reason and a
+		// role, and the run ends COMPLETED_WITH_WARNING through the ordinary "nothing was analyzed" path.
+		var classified = classifyBranch(List.of(
+				branchFile("a/OneService.java"), branchFile("b/TwoController.java"),
+				branchFile("src/main/java/com/x/entity/Order.java")), Set.of());
+
+		assertTrue(classified.stream().noneMatch(ClassifiedFile::reviewable));
+		assertTrue(classified.stream()
+				.allMatch(entry -> ChangedFileClassifier.SKIP_NO_GUIDELINE.equals(entry.skipReason())));
+		assertNotNull(classified.get(0).role());
+	}
+
+	@Test
+	void treatsAMissingCoverageSetAsAnEmptyLibrary() {
+		// loadActive() never returns a null key set, but a null must not turn into a NullPointerException
+		// halfway through a run: it is the same situation as an empty library and is reported the same way.
+		assertEquals(ChangedFileClassifier.SKIP_NO_GUIDELINE,
+				classifyOneBranchFile("src/main/java/com/x/OrderService.java", "abc", null).skipReason());
+	}
+
+	@Test
+	void aRoleWithNoGuidelineCostsNothingAgainstTheCeiling() {
+		properties.getBranchReview().setMaxFiles(2);
+
+		var classified = classifyBranch(List.of(
+				branchFile("a/OneEntity.java"), branchFile("b/TwoService.java"),
+				branchFile("c/ThreeEntity.java"), branchFile("d/FourService.java"),
+				branchFile("e/FiveService.java")), EnumSet.of(ReviewRoleType.SERVICE));
+
+		// The two entity files cannot be reviewed at all, so the budget is spent on services rather than
+		// crowded out by them.
+		assertEquals(ChangedFileClassifier.SKIP_NO_GUIDELINE, classified.get(0).skipReason());
+		assertTrue(classified.get(1).reviewable());
+		assertEquals(ChangedFileClassifier.SKIP_NO_GUIDELINE, classified.get(2).skipReason());
+		assertTrue(classified.get(3).reviewable());
+		assertEquals(ChangedFileClassifier.SKIP_BRANCH_FILE_LIMIT, classified.get(4).skipReason());
+	}
+
+	@Test
+	void recordsTheRoleOnEveryBranchRowWhateverTheVerdict() {
+		properties.getBranchReview().setMaxFiles(1);
+
+		var classified = classifyBranch(List.of(
+				branchFile("a/OneService.java"), branchFile("b/TwoService.java"),
+				branchFile("src/main/java/com/x/entity/Order.java"), branchFile("README.md")),
+				EnumSet.of(ReviewRoleType.SERVICE));
+
+		assertEquals(ReviewRoleType.SERVICE, classified.get(0).role());
+		assertTrue(classified.get(0).reviewable());
+		assertEquals(ReviewRoleType.SERVICE, classified.get(1).role());
+		assertEquals(ChangedFileClassifier.SKIP_BRANCH_FILE_LIMIT, classified.get(1).skipReason());
+		assertEquals(ReviewRoleType.ENTITY, classified.get(2).role());
+		assertEquals(ChangedFileClassifier.SKIP_NO_GUIDELINE, classified.get(2).skipReason());
+		assertNull(classified.get(3).role());
+		assertEquals(ChangedFileClassifier.SKIP_NOT_TARGET_ROLE, classified.get(3).skipReason());
+	}
+
+	// ------------------------------------------------------------------ whole-branch file ceiling
 
 	@Test
 	void marksFilesPastTheBranchCeilingRatherThanDroppingThem() {
 		properties.getBranchReview().setMaxFiles(2);
 
-		var classified = classifier.classifyBranchFiles(List.of(
+		var classified = classifyBranch(List.of(
 				branchFile("a/OneService.java"), branchFile("b/TwoService.java"),
 				branchFile("c/ThreeService.java"), branchFile("d/FourService.java")));
 
@@ -385,7 +509,7 @@ class ChangedFileClassifierTest {
 	void countsOnlyExaminableFilesTowardTheBranchCeiling() {
 		properties.getBranchReview().setMaxFiles(2);
 
-		var classified = classifier.classifyBranchFiles(List.of(
+		var classified = classifyBranch(List.of(
 				branchFile("web/node_modules/skip.js"), branchFile("a/OneService.java"),
 				branchFile("target/skip.class"), branchFile("b/TwoService.java"),
 				branchFile("c/ThreeService.java")));
@@ -403,7 +527,7 @@ class ChangedFileClassifierTest {
 	void examinesEveryRoleFileWhenTheCeilingIsNotPositive() {
 		properties.getBranchReview().setMaxFiles(0);
 
-		var classified = classifier.classifyBranchFiles(List.of(
+		var classified = classifyBranch(List.of(
 				branchFile("a/OneService.java"), branchFile("b/TwoService.java"),
 				branchFile("c/ThreeService.java")));
 

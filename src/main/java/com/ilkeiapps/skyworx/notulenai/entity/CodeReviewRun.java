@@ -85,7 +85,7 @@ public class CodeReviewRun implements Serializable {
 	@JoinColumn(name = "status_id", nullable = false)
 	private StatusProcess status;
 
-	/** Exact SHA reviewed. All source and guideline retrieval uses this, never the branch HEAD. */
+	/** Exact SHA reviewed. All source retrieval uses this, never the branch HEAD. */
 	@Column(name = "selected_commit_sha", length = 64)
 	private String selectedCommitSha;
 

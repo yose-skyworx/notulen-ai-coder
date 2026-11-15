@@ -18,7 +18,5 @@ public enum FindingValidationStatus {
 	/** Severity outside the allowed set. */
 	BAD_SEVERITY,
 	/** Confidence outside {@code [0.0, 1.0]}. */
-	BAD_CONFIDENCE,
-	/** Guideline reference does not match any guideline resolved for this run. */
-	UNKNOWN_GUIDELINE
+	BAD_CONFIDENCE
 }

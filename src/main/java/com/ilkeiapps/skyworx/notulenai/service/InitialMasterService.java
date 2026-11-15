@@ -129,17 +129,21 @@ public class InitialMasterService {
 	 * clear of the general statuses (10-12) and the document-processing statuses (20-24).
 	 * <p>
 	 * A review run or file reuses {@code PENDING}, {@code PROCESSING}, {@code COMPLETED} and
-	 * {@code FAILED} from the range above; only these four outcomes are specific to code review:
-	 * a run where some files failed is {@code COMPLETED_WITH_WARNING}, a day with no commit is
-	 * {@code NO_COMMIT}, a repository with no resolvable {@code AGENTS.md} is
-	 * {@code GUIDELINE_NOT_FOUND}, and a file deliberately not reviewed (binary, excluded path,
-	 * oversized, or inference disabled) is {@code SKIPPED} with a reason recorded alongside it.
+	 * {@code FAILED} from the range above; only these three outcomes are specific to code review: a run
+	 * where some files failed is {@code COMPLETED_WITH_WARNING}, a day with no commit is
+	 * {@code NO_COMMIT}, and a file deliberately not reviewed (binary, excluded path, oversized, no review
+	 * role, no active guideline for its role, or inference disabled) is {@code SKIPPED} with a reason
+	 * recorded alongside it.
+	 * <p>
+	 * Id 32 was {@code GUIDELINE_NOT_FOUND} and is now unused, left unassigned rather than reused: the
+	 * guidelines moved into this application's database, so a missing one is a property of one file's role
+	 * and is recorded as a {@code SKIPPED} reason, never as a run outcome. A row seeded under that id may
+	 * still exist in an already-initialized database; nothing reads it.
 	 */
 	private int seedCodeReviewStatuses() {
 		var n = 0;
 		n += persistProcessStatus(30, "COMPLETED_WITH_WARNING", "COMPLETED WITH WARNING");
 		n += persistProcessStatus(31, "NO_COMMIT", "NO COMMIT");
-		n += persistProcessStatus(32, "GUIDELINE_NOT_FOUND", "GUIDELINE NOT FOUND");
 		n += persistProcessStatus(33, "SKIPPED", "SKIPPED");
 		return n;
 	}

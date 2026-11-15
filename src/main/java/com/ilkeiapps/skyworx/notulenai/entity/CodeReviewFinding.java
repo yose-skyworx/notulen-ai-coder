@@ -108,7 +108,11 @@ public class CodeReviewFinding implements Serializable {
 	@Column(name = "evidence", columnDefinition = "text")
 	private String evidence;
 
-	/** Path of the {@code AGENTS.md} guideline this finding cites, when any. */
+	/**
+	 * The rule or section of the guideline this finding cites, as the model worded it. Free text and not
+	 * validated: which guideline was applied is a fact recorded on the run file as {@code role_type} and
+	 * {@code guideline_id}, so nothing here has to be trusted for the finding's provenance to be known.
+	 */
 	@Column(name = "guideline_reference", length = 512)
 	private String guidelineReference;
 

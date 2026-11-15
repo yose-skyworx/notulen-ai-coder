@@ -29,13 +29,13 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Full document-processing pipeline: download → Apache Tika extraction → normalization → persist
+ * Full document-processing pipeline: download → conversion to Markdown → normalization → persist
  * {@code DocumentElement}s → structure-aware chunking → BGE-M3 embeddings → persist
  * {@code DocumentChunk} (+ pgvector embedding) + {@code DocumentChunkElement}. On success the document
  * and job become {@code COMPLETED} and the document becomes the current version; on failure both move
  * to {@code FAILED} with the error recorded.
  * <p>
- * Transaction design: the remote calls (Tika, embeddings) run <em>outside</em> any DB transaction, and
+ * Transaction design: the remote calls (conversion, embeddings) run <em>outside</em> any DB transaction, and
  * each persistence/status step commits in its own short transaction via {@link TransactionTemplate}.
  * This means a late failure (e.g. a bad embedding or a missing pgvector type) does not roll back the
  * elements already written, and the {@code FAILED} status + message are always persisted so the cause
@@ -96,12 +96,11 @@ public class KnowledgeProcessingService {
 			byte[] data = readBytes(ctx.objectKey());
 			log.info("process document {}: downloaded {} bytes (contentType={})", documentId, data.length, ctx.contentType());
 
-			var extraction = tikaExtractionService.extract(data, ctx.contentType());
-			log.info("process document {}: Tika returned markdown length={}", documentId,
+			var extraction = tikaExtractionService.extract(data);
+			log.info("process document {}: conversion returned markdown length={}", documentId,
 					extraction.content() == null ? 0 : extraction.content().length());
 
-			var title = extraction.title() != null && !extraction.title().isBlank() ? extraction.title() : ctx.title();
-			var normalized = normalizationService.normalize(extraction.content(), title);
+			var normalized = normalizationService.normalize(extraction.content(), ctx.title());
 			log.info("process document {}: normalized into {} elements", documentId, normalized.size());
 
 			tx.executeWithoutResult(status -> persistElements(documentId, normalized));

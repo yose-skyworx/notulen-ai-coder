@@ -1,7 +1,6 @@
 package com.ilkeiapps.skyworx.notulenai.service;
 
 import java.math.BigDecimal;
-import java.util.Set;
 
 import org.springframework.stereotype.Service;
 
@@ -16,8 +15,14 @@ import lombok.extern.slf4j.Slf4j;
  * Checks an AI-produced finding against the facts of the file before it is persisted.
  * <p>
  * A finding is a claim, not a defect. The model can cite a line that does not exist, quote evidence it
- * invented, or attribute a rule to a guideline that was never loaded. Every one of those is checkable
- * against data the run already has, so it is checked.
+ * invented, or omit the severity the column requires. Every one of those is checkable against data the
+ * run already has, so it is checked.
+ * <p>
+ * What is <em>not</em> checked is the {@code guidelineReference} the model returns. Which guideline was
+ * applied is decided by the pipeline, not by the model: the file's role selects it and
+ * {@code code_review_run_files.guideline_id} records it. Provenance that is written from a fact beats a
+ * citation that has to be trusted, so the free-text reference is kept for the human reading the finding
+ * and never treated as evidence of anything.
  * <p>
  * Rejected findings are persisted with their status and a reason rather than discarded. Silently
  * dropping them would make the pipeline look more accurate than it is, and accuracy is the one property
@@ -59,10 +64,9 @@ public class FindingValidator {
 	 * @param filePathUnderReview the file this candidate was produced for
 	 * @param snapshotSide        which side of the diff {@code snapshotLineCount} describes
 	 * @param snapshotLineCount   lines in that snapshot, or 0 when it could not be read
-	 * @param knownGuidelines     paths of the {@code AGENTS.md} files resolved for this run
 	 */
 	public Validated validate(CandidateFinding candidate, String filePathUnderReview, DiffSide snapshotSide,
-			int snapshotLineCount, Set<String> knownGuidelines) {
+			int snapshotLineCount) {
 		if (candidate == null) {
 			return reject(FindingValidationStatus.MISSING_EVIDENCE, "no finding was supplied");
 		}
@@ -92,13 +96,6 @@ public class FindingValidator {
 		var lineCheck = checkLines(candidate, snapshotSide, snapshotLineCount);
 		if (lineCheck != null) {
 			return lineCheck;
-		}
-
-		var reference = candidate.guidelineReference();
-		if (reference != null && !reference.isBlank()
-				&& (knownGuidelines == null || !knownGuidelines.contains(reference.trim()))) {
-			return reject(FindingValidationStatus.UNKNOWN_GUIDELINE,
-					"guideline '" + reference + "' was not resolved for this run");
 		}
 
 		return new Validated(FindingValidationStatus.VALID, null);

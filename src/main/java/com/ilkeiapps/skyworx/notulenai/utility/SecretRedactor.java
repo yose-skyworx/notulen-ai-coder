@@ -8,8 +8,13 @@ import java.util.regex.Pattern;
  * <p>
  * Repository content is untrusted input that frequently carries secrets by accident — a committed
  * {@code .env} sample, a connection string in a test fixture, a private key pasted into a README.
- * Sending that to an inference endpoint publishes it to a third party, so every guideline, diff, and
- * source snapshot passes through here first.
+ * Sending that to an inference endpoint publishes it to a third party, so every diff and source
+ * snapshot passes through here first.
+ * <p>
+ * Guideline text deliberately does not. It is authored in this application and stored in its own
+ * database, not fetched from the repository under review, so there is no accident to guard against —
+ * and a standard that documents what a credential looks like is exactly the kind of text these
+ * patterns would mangle. See {@code ReviewContextBuilder}.
  * <p>
  * Redaction is best-effort by nature: it catches the shapes that matter and cannot catch a secret that
  * looks like an ordinary identifier. The point is to make an accidental leak unlikely, not to make

@@ -91,8 +91,13 @@ public class CodeReviewRunFile implements Serializable {
 	private String language;
 
 	/**
-	 * The review role this file resolved to, which is what selected its guideline. Null on a skipped row:
-	 * a file that plays none of the roles is skipped precisely because there is no guideline for it.
+	 * The review role this file resolved to, which is what selected its guideline. Null when no role was
+	 * resolved — either the file plays none of them, which is why it was skipped, or a commit-based run
+	 * skipped it before its content was fetched and the annotation tier could decide.
+	 * <p>
+	 * Deliberately set on a skipped row whenever the role is known. "This is a service and there is no
+	 * active service standard" says more than the skip reason alone, and it is what makes
+	 * {@code NO_GUIDELINE} rows countable per role instead of being one undifferentiated pile.
 	 */
 	@Enumerated(EnumType.STRING)
 	@Column(name = "role_type", length = 16)

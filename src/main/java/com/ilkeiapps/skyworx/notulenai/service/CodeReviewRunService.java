@@ -5,12 +5,10 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -25,6 +23,7 @@ import com.ilkeiapps.ilkeitoolentityblazebit.validator.IlKeiEntityValidator;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.DiffSide;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FindingValidationStatus;
+import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewSeverity;
 import com.ilkeiapps.skyworx.notulenai.bean.web.ApiResponse;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchTriggerRequest;
@@ -40,14 +39,13 @@ import com.ilkeiapps.skyworx.notulenai.entity.CodeReviewRunFile;
 import com.ilkeiapps.skyworx.notulenai.entity.Project;
 import com.ilkeiapps.skyworx.notulenai.entity.QCodeRepository;
 import com.ilkeiapps.skyworx.notulenai.entity.QCodeReviewBranch;
-import com.ilkeiapps.skyworx.notulenai.entity.QCodeReviewGuideline;
 import com.ilkeiapps.skyworx.notulenai.entity.QCodeReviewRun;
 import com.ilkeiapps.skyworx.notulenai.entity.QCodeReviewRunFile;
 import com.ilkeiapps.skyworx.notulenai.entity.StatusProcess;
 import com.ilkeiapps.skyworx.notulenai.entityview.codereview.CodeReviewRunDetailView;
 import com.ilkeiapps.skyworx.notulenai.entityview.codereview.CodeReviewRunFileListView;
-import com.ilkeiapps.skyworx.notulenai.service.AgentsGuidelineResolver.Guideline;
 import com.ilkeiapps.skyworx.notulenai.service.ChangedFileClassifier.ClassifiedFile;
+import com.ilkeiapps.skyworx.notulenai.service.CodeReviewGuidelineService.ActiveGuideline;
 import com.ilkeiapps.skyworx.notulenai.service.FindingValidator.CandidateFinding;
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.CommitInfo;
 import com.ilkeiapps.skyworx.notulenai.service.ReviewAgent.ReviewTarget;
@@ -60,8 +58,13 @@ import lombok.extern.slf4j.Slf4j;
 
 /**
  * Orchestrates a code review run: establish what is being reviewed, list and classify the files, resolve
- * the governing {@code AGENTS.md} guidelines, build a redacted context per file, ask the
- * {@link ReviewAgent}, validate what came back, and persist the lot.
+ * each file's review role and the active guideline for that role, build a redacted context per file, ask
+ * the {@link ReviewAgent}, validate what came back, and persist the lot.
+ * <p>
+ * <b>The standard is ours, not the repository's.</b> Guidelines live in this application's database — see
+ * {@link CodeReviewGuidelineService} — so the repository under review contributes only the code being
+ * judged. Nothing is read from it to decide what "correct" means, which is what lets one run review any
+ * repository the same way and stops a repository from changing its own verdict by editing a file.
  * <p>
  * <b>Two run strategies.</b> {@code MANUAL} reviews one commit's diff — the latest commit that reached the
  * branch during a calendar day — and is what both the scheduler and {@code trigger-project} produce.
@@ -114,10 +117,19 @@ public class CodeReviewRunService {
 	private static final String STATUS_FAILED = "FAILED";
 	private static final String STATUS_SKIPPED = "SKIPPED";
 	private static final String STATUS_NO_COMMIT = "NO_COMMIT";
-	private static final String STATUS_GUIDELINE_NOT_FOUND = "GUIDELINE_NOT_FOUND";
 
-	/** Skip reasons recorded on {@code code_review_run_files.skip_reason}. */
-	private static final String SKIP_NO_GUIDELINE = "NO_GUIDELINE";
+	/**
+	 * Skip reasons recorded on {@code code_review_run_files.skip_reason}. The other two —
+	 * {@code ChangedFileClassifier.SKIP_NOT_TARGET_ROLE} and {@code SKIP_NO_GUIDELINE} — are emitted during
+	 * classification; these three can only be discovered once a file's content is in hand.
+	 * <p>
+	 * There is deliberately no run-level status for a missing guideline. Guidelines are library rows keyed
+	 * by role, so a gap is per-file, not per-run: a library missing only the entity standard still reviews
+	 * every service and controller normally, and those files are skipped with a reason while the run ends
+	 * {@code COMPLETED_WITH_WARNING} through the ordinary "nothing was analyzed" path in
+	 * {@link #finalizeRun}. A terminal state would have claimed the whole run failed when part of it
+	 * succeeded.
+	 */
 	private static final String SKIP_SOURCE_NOT_FOUND = "SOURCE_NOT_FOUND";
 	private static final String SKIP_FILE_TOO_LARGE = "FILE_TOO_LARGE";
 	private static final String SKIP_INFERENCE_DISABLED = "INFERENCE_DISABLED";
@@ -127,8 +139,8 @@ public class CodeReviewRunService {
 	private static final int MAX_PATH_LENGTH = 1024;
 	/**
 	 * Limit shared by the {@code varchar(512)} columns written here: {@code skip_reason},
-	 * {@code guideline_path}, {@code guideline_reference}, and {@code validation_detail}. Truncating
-	 * beats failing an insert over a long path or a verbose reason.
+	 * {@code guideline_reference}, and {@code validation_detail}. Truncating beats failing an insert over a
+	 * long path or a verbose reason.
 	 */
 	private static final int MAX_DETAIL_LENGTH = 512;
 
@@ -151,8 +163,8 @@ public class CodeReviewRunService {
 	private final GithubApiClient githubApiClient;
 	private final CommitSelectionService commitSelectionService;
 	private final ChangedFileClassifier changedFileClassifier;
-	private final JavaRoleFilter javaRoleFilter;
-	private final AgentsGuidelineResolver agentsGuidelineResolver;
+	private final ReviewRoleResolver roleResolver;
+	private final CodeReviewGuidelineService guidelineService;
 	private final ReviewContextBuilder reviewContextBuilder;
 	private final FindingValidator findingValidator;
 	private final ReviewAgent reviewAgent;
@@ -235,7 +247,7 @@ public class CodeReviewRunService {
 			for (BranchRef branch : branches) {
 				try {
 					var runId = executeRun(repository, branch, reviewDate, STRATEGY_MANUAL,
-							claimed -> runReview(claimed, reviewDate));
+							(claimed, guidelines) -> runReview(claimed, guidelines, reviewDate));
 					var result = loadRunResult(runId);
 					if (result != null) {
 						wrap.addData(result);
@@ -366,15 +378,52 @@ public class CodeReviewRunService {
 	}
 
 	/**
+	 * What one file is being reviewed as: the role it resolved to, and the active guideline that role
+	 * selected. {@code guideline} is null exactly when the role had no active version, or when no role was
+	 * resolved at all.
+	 */
+	private record ReviewBasis(ReviewRoleType role, ActiveGuideline guideline) {
+
+		/** True when there is a standard to review against, which is the only thing that makes a review possible. */
+		boolean reviewable() {
+			return guideline != null;
+		}
+	}
+
+	/**
+	 * Resolves the basis for one file. A whole-branch run already settled the role from the path during
+	 * classification; a commit run defers it to here, where the fetched content lets the annotation tier
+	 * decide a file whose path matched no pattern.
+	 */
+	private ReviewBasis basisFor(ClassifiedFile file, String content, Map<ReviewRoleType, ActiveGuideline> guidelines) {
+		var role = file.role() != null ? file.role() : roleResolver.roleOf(file.file().path(), content);
+		return new ReviewBasis(role, role == null ? null : guidelines.get(role));
+	}
+
+	/**
 	 * Claims the run row, then executes the pipeline. Any failure is recorded as {@code FAILED} on the
 	 * run in its own committed transaction, so the row always explains what happened to it.
 	 * <p>
 	 * The pipeline is a parameter because the two strategies differ only in how they establish the file
 	 * list, and everything around that — claiming, failure recording, the run id — is identical. Passing
 	 * it in keeps one copy of the failure isolation rather than two that can drift apart.
+	 * <p>
+	 * The guideline library is read here, once per run, before anything is claimed or fetched. Both
+	 * strategies need it and neither should read it per file, and reading it before the claim means an
+	 * empty library is reported against the run that is about to be affected by it.
 	 */
 	private Long executeRun(RepositoryRef repository, BranchRef branch, LocalDate reviewDate, String strategy,
-			Consumer<ClaimedRun> pipeline) {
+			BiConsumer<ClaimedRun, Map<ReviewRoleType, ActiveGuideline>> pipeline) {
+		// Carried as plain values, not entities: the pipeline below runs untransactioned by design, so
+		// managed objects would either detach mid-flight or hold a persistence context open across every
+		// GitHub call. loadActive() runs in its own read-only transaction and closes it.
+		var guidelines = guidelineService.loadActive();
+		if (guidelines.isEmpty()) {
+			log.warn("code review: the guideline library has no active version, so every file in the run for "
+					+ "{} on {} will be skipped as {}", repository.slug(), branch.branchName(),
+					ChangedFileClassifier.SKIP_NO_GUIDELINE);
+		}
+
 		var claimed = tx.execute(status -> claimRun(repository, branch, reviewDate, strategy));
 		if (claimed == null) {
 			throw new IllegalStateException("Could not claim a review run for " + repository.slug()
@@ -385,7 +434,7 @@ public class CodeReviewRunService {
 		log.info("code review: run {} started for {} on {} ({}, strategy {})", runId, repository.slug(),
 				branch.branchName(), reviewDate, strategy);
 		try {
-			pipeline.accept(claimed);
+			pipeline.accept(claimed, guidelines);
 		} catch (RuntimeException e) {
 			log.error("code review: run {} failed", runId, e);
 			try {
@@ -399,10 +448,10 @@ public class CodeReviewRunService {
 
 	/**
 	 * The pipeline itself. Remote calls run untransactioned; every persistence step is its own short
-	 * transaction. Two branches terminate early with their own status rather than falling through to
-	 * {@code COMPLETED}: no commit in the window, and no guideline to review against.
+	 * transaction. One branch terminates early with its own status rather than falling through to
+	 * {@code COMPLETED}: no commit reached the branch during the review window.
 	 */
-	private void runReview(ClaimedRun claimed, LocalDate reviewDate) {
+	private void runReview(ClaimedRun claimed, Map<ReviewRoleType, ActiveGuideline> guidelines, LocalDate reviewDate) {
 		var runId = claimed.runId();
 
 		var selection = commitSelectionService.selectForDay(claimed.owner(), claimed.repoName(),
@@ -426,31 +475,12 @@ public class CodeReviewRunService {
 			throw new IllegalStateException("Could not persist the file list for run " + runId);
 		}
 
-		var changedPaths = new ArrayList<String>(classified.size());
-		for (ClassifiedFile file : classified) {
-			changedPaths.add(file.file().path());
-		}
-		var guidelines = agentsGuidelineResolver.resolve(claimed.owner(), claimed.repoName(), commit.sha(),
-				changedPaths);
-
-		if (guidelines.isEmpty()) {
-			tx.executeWithoutResult(status -> recordNoGuideline(runId));
-			log.warn("code review: run {} resolved no AGENTS.md, recorded GUIDELINE_NOT_FOUND", runId);
-			return;
-		}
-		tx.executeWithoutResult(status -> persistGuidelines(runId, guidelines));
-
-		var guidelinePaths = new HashSet<String>();
-		for (Guideline guideline : guidelines) {
-			guidelinePaths.add(guideline.path());
-		}
-
 		for (ClassifiedFile file : classified) {
 			var runFileId = persisted.pendingIdsByPath().get(file.file().path());
 			if (runFileId == null) {
 				continue;
 			}
-			reviewOneFile(claimed, runId, runFileId, file, commit.sha(), parentSha, guidelines, guidelinePaths);
+			reviewOneFile(claimed, runId, runFileId, file, commit.sha(), parentSha, guidelines);
 		}
 
 		tx.executeWithoutResult(status -> finalizeRun(runId, null));
@@ -466,12 +496,12 @@ public class CodeReviewRunService {
 	 * Everything is read at the head SHA the tree listing pinned, so one run reviews one immutable snapshot
 	 * even if the branch moves while the run is in flight.
 	 */
-	private void runBranchReview(ClaimedRun claimed) {
+	private void runBranchReview(ClaimedRun claimed, Map<ReviewRoleType, ActiveGuideline> guidelines) {
 		var runId = claimed.runId();
 
 		var tree = githubApiClient.listBranchTree(claimed.owner(), claimed.repoName(), claimed.branchName());
 		var headSha = tree.head().sha();
-		var classified = changedFileClassifier.classifyBranchFiles(tree.files());
+		var classified = changedFileClassifier.classifyBranchFiles(tree.files(), guidelines.keySet());
 		logFiles(runId, headSha, "holds", classified);
 
 		// Written before the file rows so the resume check inside persistRunFiles can compare against it.
@@ -483,30 +513,12 @@ public class CodeReviewRunService {
 			throw new IllegalStateException("Could not persist the file list for run " + runId);
 		}
 
-		// Derived from the files that will actually be reviewed, not from the whole tree. The resolver
-		// probes one AGENTS.md per ancestor directory of every path it is given and caps the probe list, so
-		// handing it the entire branch would spend the cap on directories nothing is being reviewed in.
-		var reviewedPaths = new ArrayList<String>(persisted.pendingIdsByPath().keySet());
-		var guidelines = agentsGuidelineResolver.resolve(claimed.owner(), claimed.repoName(), headSha, reviewedPaths);
-
-		if (guidelines.isEmpty()) {
-			tx.executeWithoutResult(status -> recordNoGuideline(runId));
-			log.warn("code review: run {} resolved no AGENTS.md, recorded GUIDELINE_NOT_FOUND", runId);
-			return;
-		}
-		tx.executeWithoutResult(status -> persistGuidelines(runId, guidelines));
-
-		var guidelinePaths = new HashSet<String>();
-		for (Guideline guideline : guidelines) {
-			guidelinePaths.add(guideline.path());
-		}
-
 		for (ClassifiedFile file : classified) {
 			var runFileId = persisted.pendingIdsByPath().get(file.file().path());
 			if (runFileId == null) {
 				continue;
 			}
-			reviewOneFile(claimed, runId, runFileId, file, headSha, null, guidelines, guidelinePaths);
+			reviewOneFile(claimed, runId, runFileId, file, headSha, null, guidelines);
 		}
 
 		var note = tree.truncated()
@@ -524,7 +536,7 @@ public class CodeReviewRunService {
 	 * abandon every remaining file because of one.
 	 */
 	private void reviewOneFile(ClaimedRun claimed, Long runId, Long runFileId, ClassifiedFile file,
-			String commitSha, String parentSha, List<Guideline> guidelines, Set<String> guidelinePaths) {
+			String commitSha, String parentSha, Map<ReviewRoleType, ActiveGuideline> guidelines) {
 		var path = file.file().path();
 		tx.executeWithoutResult(status -> markFileProcessing(runFileId));
 
@@ -547,22 +559,30 @@ public class CodeReviewRunService {
 			}
 			var text = content.get().text();
 
-			// Applied here rather than during classification because the third tier reads the file content,
-			// and this is where the content is in hand — no extra GitHub call. Ahead of the context build so
-			// a rejected file costs nothing further, and ahead of the inference check so a file outside the
-			// target roles reports that instead of the blunter INFERENCE_DISABLED.
+			// Settled here rather than during classification because the annotation tier reads the content,
+			// and this is where the content is in hand — no extra GitHub call. A whole-branch run already
+			// resolved the role from the path during classification, so for it this only looks the guideline
+			// up; a commit run resolves both here. Both strategies end up recording the same reasons.
 			//
-			// A whole-branch run has already settled this from the path in classifyBranchFiles, so nothing it
-			// sends here can be rejected twice — every file that reached this line matched a pattern tier.
-			// The check stays unconditional because a commit run depends on it, and because the two must keep
-			// recording the same reason.
-			if (!javaRoleFilter.isExamined(path, text)) {
-				log.info("code review: {} is not a Spring Boot service, controller or entity, skipped", path);
+			// Ahead of the context build so a rejected file costs nothing further, and ahead of the
+			// inference check so a file with no standard says that rather than the blunter
+			// INFERENCE_DISABLED.
+			var basis = basisFor(file, text, guidelines);
+			tx.executeWithoutResult(status -> recordBasis(runFileId, basis));
+
+			if (basis.role() == null) {
+				log.info("code review: {} plays none of the reviewed roles, skipped", path);
 				tx.executeWithoutResult(status -> skipFile(runFileId, ChangedFileClassifier.SKIP_NOT_TARGET_ROLE));
 				return;
 			}
+			if (!basis.reviewable()) {
+				log.info("code review: {} is a {} but no guideline version is active for that role, skipped", path,
+						basis.role());
+				tx.executeWithoutResult(status -> skipFile(runFileId, ChangedFileClassifier.SKIP_NO_GUIDELINE));
+				return;
+			}
 
-			var context = reviewContextBuilder.build(path, guidelines, file.file().patch(), text);
+			var context = reviewContextBuilder.build(path, basis.guideline().content(), file.file().patch(), text);
 
 			if (!properties.getInference().isEnabled()) {
 				tx.executeWithoutResult(status -> skipFile(runFileId, SKIP_INFERENCE_DISABLED));
@@ -573,8 +593,7 @@ public class CodeReviewRunService {
 					new ReviewTarget(path, file.language(), file.changeStatus(), context));
 			var lineCount = countLines(text);
 
-			tx.executeWithoutResult(status -> persistFindings(runId, runFileId, path, side, lineCount, candidates,
-					guidelinePaths));
+			tx.executeWithoutResult(status -> persistFindings(runId, runFileId, path, side, lineCount, candidates));
 		} catch (RuntimeException e) {
 			log.error("code review: file {} in run {} failed", path, runId, e);
 			try {
@@ -692,6 +711,10 @@ public class CodeReviewRunService {
 			row.setOldFilePath(truncate(file.file().previousFilename(), MAX_PATH_LENGTH));
 			row.setChangeStatus(file.changeStatus());
 			row.setLanguage(file.language());
+			// Only a whole-branch run knows the role this early, from the path. A commit run leaves it null
+			// here and recordBasis fills it in once the content has settled it; skipped rows keep whatever
+			// classification decided, which is why this is written unconditionally rather than merged.
+			row.setRoleType(file.role());
 			row.setAdditions(file.file().additions());
 			row.setDeletions(file.file().deletions());
 			row.setDiffHash(hash);
@@ -732,36 +755,30 @@ public class CodeReviewRunService {
 		return new PersistedFiles(classified.size(), skipped, pendingIdsByPath);
 	}
 
-	private void persistGuidelines(Long runId, List<Guideline> guidelines) {
-		var run = this.em.find(CodeReviewRun.class, runId);
-		if (run == null) {
+	/**
+	 * Writes the role and the guideline version onto the file's row as soon as both are known, before the
+	 * review itself runs. Recording it here rather than at each terminal write means every outcome — skip,
+	 * failure, findings, or a crash between them — leaves the row saying what it was being reviewed as, and
+	 * the three writers below stay free of parameters they would only pass through.
+	 * <p>
+	 * Both columns are only ever set, never cleared: a resume re-examines a file whose row already carries
+	 * the previous basis, and nulling it on the way would lose the record if the re-examination then failed
+	 * before reaching a terminal write.
+	 */
+	private void recordBasis(Long runFileId, ReviewBasis basis) {
+		var row = this.em.find(CodeReviewRunFile.class, runFileId);
+		if (row == null) {
 			return;
 		}
-
-		var existing = new HashMap<String, CodeReviewGuideline>();
-		var qg = new QCodeReviewGuideline("g");
-		for (CodeReviewGuideline row : configBuilder.create(em, CodeReviewGuideline.class)
-				.from(CodeReviewGuideline.class, qg.getMetadata().getName())
-				.where(qg.run.id.toString()).eq(runId)
-				.getResultList()) {
-			existing.put(row.getGuidelinePath(), row);
+		if (basis.role() != null) {
+			row.setRoleType(basis.role());
 		}
-
-		var now = Instant.now();
-		for (Guideline guideline : guidelines) {
-			var path = truncate(guideline.path(), MAX_DETAIL_LENGTH);
-			var row = existing.get(path);
-			if (row == null) {
-				row = new CodeReviewGuideline();
-				row.setRun(run);
-				row.setGuidelinePath(path);
-				row.setCreatedAt(now);
-				this.em.persist(row);
-			}
-			row.setGuidelineCommitSha(guideline.commitSha());
-			row.setContentHash(guideline.contentHash());
-			row.setContentSnapshot(guideline.content());
+		if (basis.guideline() != null) {
+			// A reference, not a find: the guideline was read moments ago by loadActive and only its id is
+			// needed here, so there is no reason to pull its text back through the session.
+			row.setGuideline(this.em.getReference(CodeReviewGuideline.class, basis.guideline().id()));
 		}
+		row.setUpdatedAt(Instant.now());
 		this.em.flush();
 	}
 
@@ -779,47 +796,6 @@ public class CodeReviewRunService {
 		run.setSkippedFiles(0);
 		run.setTotalFindings(0);
 		run.setSummary("No commit reached this branch during the review day.");
-		run.setErrorMessage(null);
-		run.setUpdatedAt(now);
-		this.em.flush();
-	}
-
-	/**
-	 * Terminal: without a guideline there is no standard to review against, so the remaining files are
-	 * marked skipped and the run is closed rather than producing findings that cite nothing.
-	 */
-	private void recordNoGuideline(Long runId) {
-		var run = this.em.find(CodeReviewRun.class, runId);
-		if (run == null) {
-			return;
-		}
-		var now = Instant.now();
-		var skippedStatus = processStatus(STATUS_SKIPPED);
-		var files = loadRunFilesByPath(runId).values();
-		var skippedCount = 0;
-
-		for (CodeReviewRunFile row : files) {
-			if (STATUS_PROCESSING.equals(statusCode(row))) {
-				row.setStatus(skippedStatus);
-				row.setSkipReason(SKIP_NO_GUIDELINE);
-				row.setStartedAt(null);
-				row.setCompletedAt(now);
-				row.setUpdatedAt(now);
-			}
-			// Counted here rather than by a query: the rows were just modified in this persistence
-			// context, and a count query's result would depend on when Hibernate chooses to flush.
-			if (STATUS_SKIPPED.equals(statusCode(row))) {
-				skippedCount++;
-			}
-		}
-
-		run.setStatus(processStatus(STATUS_GUIDELINE_NOT_FOUND));
-		run.setCompletedAt(now);
-		run.setDurationMs(durationSince(run.getStartedAt(), now));
-		run.setAnalyzedFiles(0);
-		run.setTotalFindings(0);
-		run.setSkippedFiles(skippedCount);
-		run.setSummary("No AGENTS.md was found at the reviewed commit, so there was no guideline to review against.");
 		run.setErrorMessage(null);
 		run.setUpdatedAt(now);
 		this.em.flush();
@@ -875,7 +851,7 @@ public class CodeReviewRunService {
 	 * .total_findings} — a headline count that included rejected claims would misrepresent the review.
 	 */
 	private void persistFindings(Long runId, Long runFileId, String path, DiffSide side, int lineCount,
-			List<CandidateFinding> candidates, Set<String> guidelinePaths) {
+			List<CandidateFinding> candidates) {
 		var run = this.em.find(CodeReviewRun.class, runId);
 		var runFile = this.em.find(CodeReviewRunFile.class, runFileId);
 		if (run == null || runFile == null) {
@@ -887,7 +863,7 @@ public class CodeReviewRunService {
 
 		if (candidates != null) {
 			for (CandidateFinding candidate : candidates) {
-				var verdict = findingValidator.validate(candidate, path, side, lineCount, guidelinePaths);
+				var verdict = findingValidator.validate(candidate, path, side, lineCount);
 				if (!verdict.valid()) {
 					rejected++;
 				}
