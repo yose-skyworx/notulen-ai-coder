@@ -156,22 +156,28 @@ public class CodeReviewProperties {
 	}
 
 	/**
-	 * Restricts which {@code .java} files are examined to the three Spring Boot roles worth reviewing:
-	 * service, controller, and entity. Files of every other language are unaffected — this is a filter on
-	 * Java, not a general allowlist.
+	 * Decides which review role a file plays, and therefore which guideline a run judges it against. One
+	 * {@link Role} block per role, because the patterns are what identify the role: a single flat list
+	 * could say that a file is examinable but not which guideline applies to it.
 	 * <p>
-	 * The three lists are checked in order and the first hit wins, which matters when a file could match
-	 * more than one: {@code entity/OrderService.java} is a service by name and an entity by location, and
-	 * the name is the more specific claim. Only when neither pattern list matches does the pipeline fall
-	 * back to scanning the fetched content for an annotation, which catches correctly-annotated classes
-	 * that sit in an unconventionally named file or package.
+	 * Inside a role the three lists keep their original order — filename patterns, then directory
+	 * patterns, then annotations found in the fetched content. Across roles the tiers still beat each
+	 * other, so every role's filename list is consulted before any role's directory list. That is what
+	 * settles {@code entity/OrderService.java}: it is a service by name, and the directory tier that would
+	 * have called it an entity is never reached.
 	 * <p>
-	 * A Java file that matches nothing is recorded as {@code SKIPPED} with reason
-	 * {@code NOT_A_TARGET_ROLE}, never dropped — same rule the exclusion patterns follow.
+	 * Setting a list replaces it wholesale rather than adding to the defaults, matching how the exclusion
+	 * patterns above behave. A role whose three lists are all empty can never be resolved, so its files
+	 * are skipped — emptying a role is how that role is turned off.
 	 * <p>
-	 * Note that {@code pathPatterns} match directories, so a pattern on the {@code service} directory also
-	 * reaches {@code src/test/java/.../service/OrderServiceTest.java}. Add a {@code src/test} exclusion to
-	 * {@link Exclusions#getPatterns()} if test sources should not be reviewed at all.
+	 * There is no {@code enabled} flag here any more. Role resolution is not an optional narrowing of what
+	 * gets reviewed, it is how a file is matched to its guideline, so "off" would mean reviewing nothing.
+	 * Use {@code code-review.enabled} to switch the module off.
+	 * <p>
+	 * Note that the directory patterns match paths rather than Java files, so a role's directory list also
+	 * reaches {@code src/test/java/.../service/OrderServiceTest.java} and any non-Java file living under
+	 * that directory. Add a {@code src/test} exclusion to {@link Exclusions#getPatterns()} if test sources
+	 * should not be reviewed at all.
 	 * <p>
 	 * The Ant patterns themselves are not quoted in this Javadoc on purpose: a glob written as
 	 * asterisk-asterisk-slash inside a block comment contains the two characters that close the comment.
@@ -179,34 +185,53 @@ public class CodeReviewProperties {
 	@Setter
 	@Getter
 	public static class JavaFilter {
-		private boolean enabled = true;
+		private Role service = new Role(
+				List.of("**/*Service.java", "**/*ServiceImpl.java"),
+				List.of("**/service/**", "**/services/**"),
+				List.of("@Service"));
 
+		private Role controller = new Role(
+				List.of("**/*Controller.java", "**/*RestController.java"),
+				List.of("**/controller/**", "**/controllers/**"),
+				List.of("@RestController", "@Controller"));
+
+		private Role entity = new Role(
+				List.of("**/*Entity.java"),
+				List.of("**/entity/**", "**/entities/**"),
+				List.of("@Entity"));
+	}
+
+	/**
+	 * The three pattern tiers for one review role.
+	 * <p>
+	 * The no-argument constructor is required by configuration binding and leaves every list empty; the
+	 * per-role defaults live on the {@link JavaFilter} fields instead, so binding starts from the existing
+	 * instance and only the properties actually set are replaced. Do not collapse the two constructors
+	 * into one — with only the parameterized form, Spring binds by value object and the defaults are lost.
+	 */
+	@Setter
+	@Getter
+	public static class Role {
 		/** Ant patterns checked first, against the whole path; these key off the file name. */
-		private List<String> filenamePatterns = List.of(
-				"**/*Service.java",
-				"**/*ServiceImpl.java",
-				"**/*Controller.java",
-				"**/*RestController.java",
-				"**/*Entity.java");
+		private List<String> filenamePatterns = List.of();
 
 		/** Ant patterns checked when no filename pattern matched — these key off the directory. */
-		private List<String> pathPatterns = List.of(
-				"**/service/**",
-				"**/services/**",
-				"**/controller/**",
-				"**/controllers/**",
-				"**/entity/**",
-				"**/entities/**");
+		private List<String> pathPatterns = List.of();
 
 		/**
 		 * Annotation names checked last, against the file content already fetched for the review. Matched
 		 * on a whole-token boundary, so {@code @Controller} does not match {@code @ControllerAdvice}.
 		 */
-		private List<String> annotations = List.of(
-				"@Service",
-				"@RestController",
-				"@Controller",
-				"@Entity");
+		private List<String> annotations = List.of();
+
+		public Role() {
+		}
+
+		public Role(List<String> filenamePatterns, List<String> pathPatterns, List<String> annotations) {
+			this.filenamePatterns = filenamePatterns;
+			this.pathPatterns = pathPatterns;
+			this.annotations = annotations;
+		}
 	}
 
 	/**

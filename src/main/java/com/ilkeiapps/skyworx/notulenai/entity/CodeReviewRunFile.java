@@ -5,6 +5,7 @@ import java.io.Serializable;
 import java.time.Instant;
 
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
+import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -35,11 +36,15 @@ import lombok.Setter;
  * {@code COMPLETED_WITH_WARNING} rather than {@code FAILED}.
  * <p>
  * Skipped files are rows too, not omissions: {@code skip_reason} always says why (binary, excluded
- * path, oversized, no patch content, a Java file outside the reviewed roles, past the whole-branch file
- * ceiling, inference disabled), so nothing is silently dropped.
+ * path, oversized, no patch content, a file that plays none of the reviewed roles, a role with no active
+ * guideline, past the whole-branch file ceiling, inference disabled), so nothing is silently dropped.
  * <p>
- * {@code diff_hash} plus the run's commit SHA, this {@code file_path}, and the run's guideline hashes
- * form the idempotency key: a {@code COMPLETED} row whose key is unchanged is not re-reviewed.
+ * {@code diff_hash} plus the run's commit SHA, this {@code file_path}, and the {@code guideline_id} this
+ * row was reviewed against form the idempotency key: a {@code COMPLETED} row whose key is unchanged is not
+ * re-reviewed. Recording the guideline by id is what makes that work — publishing a new version changes
+ * the id, so a re-trigger after the standard was edited genuinely re-reviews, while a re-trigger with the
+ * standard untouched reuses the completed rows.
+ * <p>
  * {@code segment_count} and {@code segments_completed} track the splitting of an oversized file, and a
  * file must not reach {@code COMPLETED} until every segment has.
  */
@@ -84,6 +89,26 @@ public class CodeReviewRunFile implements Serializable {
 	/** Language inferred from the file extension; informational, never used to decide eligibility. */
 	@Column(name = "language", length = 32)
 	private String language;
+
+	/**
+	 * The review role this file resolved to, which is what selected its guideline. Null on a skipped row:
+	 * a file that plays none of the roles is skipped precisely because there is no guideline for it.
+	 */
+	@Enumerated(EnumType.STRING)
+	@Column(name = "role_type", length = 16)
+	private ReviewRoleType roleType;
+
+	/**
+	 * The guideline version this file was reviewed against. Referenced by id rather than snapshotted,
+	 * because a published {@link CodeReviewGuideline} is immutable — the id pins the exact wording, so a
+	 * finding can be re-explained years later without this table holding a copy of the text per run.
+	 * <p>
+	 * Null on a skipped row, including a file whose role had no active version: without a standard there
+	 * is nothing to review against, and that is recorded as a skip rather than run with an empty guideline.
+	 */
+	@ManyToOne(fetch = FetchType.LAZY)
+	@JoinColumn(name = "guideline_id")
+	private CodeReviewGuideline guideline;
 
 	@Column(name = "additions")
 	private Integer additions;
