@@ -14,6 +14,7 @@ import com.ilkeiapps.skyworx.notulenai.bean.CodeReviewScheduleRequest;
 import com.ilkeiapps.skyworx.notulenai.bean.web.ApiResponse;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeRepositoryIdRequest;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeRepositoryRequestParameter;
+import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchFilesResult;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchRequestParameter;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchTriggerRequest;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewProjectTriggerRequest;
@@ -132,40 +133,25 @@ public class CodeReviewController {
 	}
 
 	/**
-	 * Runs a review now over one branch in full: the files it holds at its current head that fall inside the
-	 * target roles, rather than the diff of one commit that reached it on one day.
+	 * Early stages of the whole-branch review, being rebuilt step by step. For now it resolves the
+	 * repository and branch from the ids in the request, connects to that branch on GitHub, lists every
+	 * file the branch holds at its current head, and classifies each by review role — service, controller,
+	 * or entity — skipping any non-Java file and any Java file that plays none of those roles. No content
+	 * is fetched and nothing is reviewed yet.
 	 * <p>
 	 * Body is {@code {"repositoryId": 1, "branchId": 2}}. Both are mandatory and the branch must belong to
 	 * the repository. The ids come from {@code /repository/list} and {@code /branch/list}; a branch
-	 * <em>name</em> is not accepted, because a run is keyed on the registered branch row and accepting a name
-	 * would mean either refusing unregistered branches or silently registering one on the caller's behalf.
+	 * <em>name</em> is not accepted, because a run is keyed on the registered branch row.
 	 * <p>
-	 * Use it when the question is "what is wrong with this branch" rather than "what changed yesterday" — a
-	 * first review of a repository that was never covered, or a re-review after the guidelines changed.
-	 * <p>
-	 * A branch listing is the whole repository, so {@code code-review.java-filter} acts as a whitelist here
-	 * rather than as a narrowing of Java: what is examined is the service, controller and entity files plus
-	 * everything under those directories, and the rest — every Vue component, migration, README — is
-	 * reported with {@code skipReason: NOT_A_TARGET_ROLE}. The filter's annotation list does not apply,
-	 * because reading annotations would mean fetching every Java file in the branch first.
-	 * {@code code-review.branch-review.max-files} then bounds how many of the selected files are examined,
-	 * and the remainder are reported as {@code BRANCH_FILE_LIMIT}. Nothing is dropped: every file GitHub
-	 * listed comes back as an entry, with the reason it was not examined when it was not.
-	 * <p>
-	 * <b>Synchronous and potentially slow</b> — much more so than the project trigger. Every examinable file
-	 * costs one GitHub content fetch and, when inference is enabled, one model call, at a file concurrency
-	 * of one. Callers must set a client read timeout well above the usual default.
-	 * <p>
-	 * There is no diff, so findings cite whole files rather than changed lines: {@code side} is always
-	 * {@code NEW} and {@code parentCommitSha} is null. The response is the same
-	 * {@link CodeReviewRunResult} shape as the project trigger, carrying one run — the branch review with
-	 * its terminal status plus every file it covered, each with a {@code skipReason} when it was not
-	 * examined. Re-triggering the same branch on the same day resumes that day's run rather than creating a
-	 * new one, so a retry only redoes the work still outstanding.
+	 * The response is a {@link CodeReviewBranchFilesResult}: the resolved head SHA, whether GitHub
+	 * truncated the listing, and every file with its resolved role or the reason it was skipped. Listing
+	 * the whole branch is a series of GitHub round trips, so the call blocks for as long as those take;
+	 * callers should set a client read timeout above the usual default. A GitHub failure comes back as
+	 * {@code status=false} with a reason rather than a server error.
 	 */
 	@PostMapping(path = "/run/trigger-branch",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)
-	public ApiResponse<CodeReviewRunResult> triggerBranchReview(
+	public ApiResponse<CodeReviewBranchFilesResult> triggerBranchReview(
 			@RequestBody CodeReviewBranchTriggerRequest req) {
 		return codeReviewRunService.triggerBranch(req);
 	}
