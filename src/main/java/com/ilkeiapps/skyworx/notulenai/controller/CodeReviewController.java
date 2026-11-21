@@ -133,21 +133,21 @@ public class CodeReviewController {
 	}
 
 	/**
-	 * Early stages of the whole-branch review, being rebuilt step by step. For now it resolves the
-	 * repository and branch from the ids in the request, connects to that branch on GitHub, lists every
-	 * file the branch holds at its current head, and classifies each by review role — service, controller,
-	 * or entity — skipping any non-Java file and any Java file that plays none of those roles. No content
-	 * is fetched and nothing is reviewed yet.
+	 * Whole-branch review by the deterministic {@code PMD} mechanism. It resolves the repository and branch
+	 * from the ids in the request, connects to that branch on GitHub, lists every file the branch holds at
+	 * its current head, classifies each by review role — service, controller, or entity — and runs the PMD
+	 * rule set over every classified file's content at that head commit. No model is involved.
 	 * <p>
 	 * Body is {@code {"repositoryId": 1, "branchId": 2}}. Both are mandatory and the branch must belong to
 	 * the repository. The ids come from {@code /repository/list} and {@code /branch/list}; a branch
 	 * <em>name</em> is not accepted, because a run is keyed on the registered branch row.
 	 * <p>
-	 * The response is a {@link CodeReviewBranchFilesResult}: the resolved head SHA, whether GitHub
-	 * truncated the listing, and every file with its resolved role or the reason it was skipped. Listing
-	 * the whole branch is a series of GitHub round trips, so the call blocks for as long as those take;
-	 * callers should set a client read timeout above the usual default. A GitHub failure comes back as
-	 * {@code status=false} with a reason rather than a server error.
+	 * The response is a {@link CodeReviewBranchFilesResult}: the resolved head SHA, whether GitHub truncated
+	 * the listing, the reviewed files with their roles (files skipped as non-Java or non-target are counted
+	 * but not listed), and every PMD finding across them. Listing the branch and fetching each reviewed
+	 * file is a series of GitHub round trips, so the call blocks for as long as those take; callers should
+	 * set a client read timeout above the usual default. A GitHub failure comes back as {@code status=false}
+	 * with a reason rather than a server error.
 	 */
 	@PostMapping(path = "/run/trigger-branch",
 			produces = MediaType.APPLICATION_JSON_VALUE, consumes = MediaType.APPLICATION_JSON_VALUE)

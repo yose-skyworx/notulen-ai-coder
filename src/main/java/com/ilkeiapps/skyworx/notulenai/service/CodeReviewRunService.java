@@ -16,6 +16,7 @@ import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
 import com.ilkeiapps.skyworx.notulenai.bean.web.ApiResponse;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchFilesResult;
+import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchFilesResult.BranchFinding;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchFilesResult.ClassifiedBranchFile;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchTriggerRequest;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewProjectTriggerRequest;
@@ -33,6 +34,7 @@ import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.GithubApiExceptio
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.GithubAuthException;
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.GithubNotFoundException;
 import com.ilkeiapps.skyworx.notulenai.service.GithubApiClient.GithubRateLimitException;
+import com.ilkeiapps.skyworx.notulenai.service.PmdService.PmdViolation;
 import com.ilkeiapps.skyworx.notulenai.service.ReviewAgent.ReviewTarget;
 import com.ilkeiapps.skyworx.notulenai.utility.Utility;
 
@@ -111,14 +113,6 @@ public class CodeReviewRunService {
 	private static final String SKIP_FILE_TOO_LARGE = "FILE_TOO_LARGE";
 	private static final String SKIP_INFERENCE_DISABLED = "INFERENCE_DISABLED";
 
-	/**
-	 * A branch listing entry that is not a Java source file. A whole-branch review classifies only Java,
-	 * so a file of any other language is skipped with this reason — stricter than
-	 * {@link ReviewRoleResolver#roleOfPath}, whose directory tier would otherwise claim a non-Java file
-	 * living under a role's directory.
-	 */
-	private static final String SKIP_NOT_JAVA = "NOT_JAVA";
-
 	/** Case-insensitive suffix that marks a path as Java source, the one language this review classifies. */
 	private static final String JAVA_EXTENSION = ".java";
 
@@ -138,6 +132,7 @@ public class CodeReviewRunService {
 	private final CodeReviewGuidelineService guidelineService;
 	private final ReviewContextBuilder reviewContextBuilder;
 	private final ReviewAgent reviewAgent;
+	private final PmdService pmdService;
 
 	// ------------------------------------------------------------------ entry point
 
@@ -238,20 +233,23 @@ public class CodeReviewRunService {
 	}
 
 	/**
-	 * First stages of a whole-branch review, rebuilt step by step. For now it does four things and returns
-	 * what they found:
+	 * A whole-branch review by the deterministic {@code PMD} mechanism, rebuilt step by step. It does five
+	 * things and returns what they found:
 	 * <ol>
 	 * <li>gets the registered repository and branch rows for the ids in the request, checking the branch
 	 * belongs to the repository;</li>
 	 * <li>connects to that repository and branch on GitHub;</li>
 	 * <li>retrieves every file the branch holds at its current head;</li>
 	 * <li>classifies each file by the role it plays — service, controller, or entity — skipping any file
-	 * that is not Java, and any Java file that plays none of those roles.</li>
+	 * that is not Java, and any Java file that plays none of those roles;</li>
+	 * <li>fetches each classified file at the pinned head SHA and runs the {@link PmdService} rule set over
+	 * it, collecting the violations.</li>
 	 * </ol>
-	 * The response carries the resolved head SHA and every file with its role or the reason it was skipped
-	 * — no content fetch and no model call yet. The later stages, and the run/persistence pipeline below
-	 * ({@link #executeRun}, {@link #runBranchReview}), are left intact and will be wired back in as this is
-	 * built up.
+	 * The response carries the resolved head SHA, the reviewed files with their roles, and
+	 * every PMD finding across the classified files. No model is involved — this is deterministic static
+	 * analysis — so it produces findings whether or not inference is enabled. Nothing is persisted: this is
+	 * the read-only {@code PMD} path, and the run/persistence pipeline below ({@link #executeRun},
+	 * {@link #runBranchReview}) remains the route that records a run.
 	 * <p>
 	 * Both ids are mandatory and the branch must belong to the repository. A branch <em>name</em> is not
 	 * accepted: naming the registered row makes the ownership check the query's job, so one id cannot be
@@ -331,12 +329,12 @@ public class CodeReviewRunService {
 			return wrap;
 		}
 
-		// 4. Classify each file by the role it plays. A non-Java file is skipped as NOT_JAVA; a Java file
-		//    that matches none of the service/controller/entity rules is skipped as NOT_A_TARGET_ROLE.
-		//    roleOfPath carries the actual rule (filename tier, then directory tier), reused rather than
-		//    reimplemented. Every file stays in the response with its role or its skip reason — nothing is
-		//    dropped.
-		var files = new ArrayList<ClassifiedBranchFile>(tree.files().size());
+		// 4. Classify each file by the role it plays, keeping only the files that will be reviewed. A non-Java
+		//    file, and a Java file that matches none of the service/controller/entity rules, is counted but
+		//    not listed — the response is the branch's reviewed subset, not every path. roleOfPath carries the
+		//    actual rule (filename tier, then directory tier), reused rather than reimplemented.
+		var totalFiles = tree.files().size();
+		var files = new ArrayList<ClassifiedBranchFile>();
 		var serviceCount = 0;
 		var controllerCount = 0;
 		var entityCount = 0;
@@ -344,17 +342,15 @@ public class CodeReviewRunService {
 		for (BranchFile file : tree.files()) {
 			var path = file.path();
 			if (!isJavaFile(path)) {
-				files.add(new ClassifiedBranchFile(path, null, SKIP_NOT_JAVA));
 				skippedCount++;
 				continue;
 			}
 			var role = roleResolver.roleOfPath(path);
 			if (role == null) {
-				files.add(new ClassifiedBranchFile(path, null, ChangedFileClassifier.SKIP_NOT_TARGET_ROLE));
 				skippedCount++;
 				continue;
 			}
-			files.add(new ClassifiedBranchFile(path, role, null));
+			files.add(new ClassifiedBranchFile(path, role));
 			switch (role) {
 				case SERVICE -> serviceCount++;
 				case CONTROLLER -> controllerCount++;
@@ -362,14 +358,63 @@ public class CodeReviewRunService {
 			}
 		}
 		log.info("code review: {} on {} holds {} file(s) at {}{} — {} service, {} controller, {} entity, "
-				+ "{} skipped", repository.slug(), branch.branchName(), files.size(), tree.head().sha(),
+				+ "{} skipped", repository.slug(), branch.branchName(), totalFiles, tree.head().sha(),
 				tree.truncated() ? " (listing truncated by GitHub)" : "", serviceCount, controllerCount,
 				entityCount, skippedCount);
 
+		// 5. Fetch each classified file at the pinned head SHA and run the deterministic PMD rule set over it.
+		//    No model is involved, so this stage runs whether or not inference is enabled.
+		var findings = analyseClassifiedFiles(repository, tree.head().sha(), files);
+		log.info("code review: PMD found {} finding(s) across the reviewed files of {} on {}", findings.size(),
+				repository.slug(), branch.branchName());
+
 		wrap.insertNewData(new CodeReviewBranchFilesResult(repository.slug(), branch.branchName(),
-				tree.head().sha(), tree.truncated(), files.size(), files));
+				tree.head().sha(), tree.truncated(), totalFiles, files, findings));
 		wrap.setStatus(true);
 		return wrap;
+	}
+
+	/**
+	 * Runs the PMD rule set over every classified file and collects the violations.
+	 * <p>
+	 * Only a file that resolved to a role is analysed — the same selection the review pipeline covers; a
+	 * skipped file ({@code NOT_JAVA}, {@code NOT_A_TARGET_ROLE}) is never fetched. Content is read at the
+	 * pinned head SHA, so a finding's line numbers index the snapshot that was listed rather than a branch
+	 * that may have moved.
+	 * <p>
+	 * Each file is fetched and analysed on its own: one that cannot be read, is missing at the commit, or is
+	 * too large is logged and skipped rather than failing the whole listing — the same per-file isolation the
+	 * review pipeline applies. {@link PmdService#analyse} is in-memory and deterministic, and every GitHub
+	 * read here runs outside any transaction, as all of this class does.
+	 */
+	private List<BranchFinding> analyseClassifiedFiles(RepositoryRef repository, String headSha,
+			List<ClassifiedBranchFile> files) {
+		var findings = new ArrayList<BranchFinding>();
+		for (ClassifiedBranchFile file : files) {
+			if (file.role() == null) {
+				continue;
+			}
+			var path = file.path();
+			try {
+				var content = githubApiClient.findFileContent(repository.owner(), repository.repoName(), headSha, path);
+				if (content.isEmpty()) {
+					log.warn("pmd: {} at {} could not be fetched, not analysed", path, headSha);
+					continue;
+				}
+				if (content.get().oversized()) {
+					log.info("pmd: {} is too large to analyse, skipped", path);
+					continue;
+				}
+				for (PmdViolation violation : pmdService.analyse(path, content.get().text())) {
+					findings.add(new BranchFinding(path, violation.ruleName(), violation.message(),
+							violation.beginLine(), violation.endLine(), violation.priority()));
+				}
+			} catch (RuntimeException e) {
+				// One file's fetch or analysis failing must not abandon the rest of the branch.
+				log.warn("pmd: analysing {} at {} failed, skipped", path, headSha, e);
+			}
+		}
+		return findings;
 	}
 
 	// ------------------------------------------------------------------ one run
