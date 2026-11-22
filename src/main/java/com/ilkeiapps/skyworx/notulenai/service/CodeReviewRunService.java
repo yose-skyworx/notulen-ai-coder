@@ -1,5 +1,6 @@
 package com.ilkeiapps.skyworx.notulenai.service;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import com.ilkeiapps.ilkeitool.validator.IlKeiValidator;
 import com.ilkeiapps.ilkeitool.validator.ProcessResult;
+import com.ilkeiapps.skyworx.notulenai.bean.enums.BranchReviewStatus;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.DiffSide;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
@@ -267,6 +269,11 @@ public class CodeReviewRunService {
 		var wrap = new ApiResponse<CodeReviewBranchFilesResult>();
 		wrap.setStatus(false);
 
+		// Captured before any work so the persisted row's started_at spans the whole execution. The
+		// pre-resolution failures below return before a repository/branch id exists, so nothing is persisted
+		// for them; persistence begins only once both are resolved.
+		var startedAt = Instant.now();
+
 		if (!properties.isEnabled()) {
 			wrap.setMessage(Utility.getErrorMessage("codereview.module_disabled"));
 			return wrap;
@@ -314,18 +321,22 @@ public class CodeReviewRunService {
 			log.warn("code review: GitHub rejected the token listing {} on {}", repository.slug(),
 					branch.branchName(), e);
 			wrap.setMessage(Utility.getErrorMessage("codereview.github.token_invalid"));
+			recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.FAILED, null);
 			return wrap;
 		} catch (GithubNotFoundException e) {
 			log.warn("code review: GitHub could not resolve {} on {}", repository.slug(), branch.branchName(), e);
 			wrap.setMessage(Utility.getErrorMessage("codereview.github.not_found"));
+			recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.FAILED, null);
 			return wrap;
 		} catch (GithubRateLimitException e) {
 			log.warn("code review: GitHub rate limited listing {} on {}", repository.slug(), branch.branchName(), e);
 			wrap.setMessage(Utility.getErrorMessage("codereview.github.rate_limited"));
+			recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.FAILED, null);
 			return wrap;
 		} catch (GithubApiException e) {
 			log.error("code review: GitHub call failed listing {} on {}", repository.slug(), branch.branchName(), e);
 			wrap.setMessage(Utility.getErrorMessage("codereview.github.unreachable"));
+			recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.FAILED, null);
 			return wrap;
 		}
 
@@ -368,10 +379,32 @@ public class CodeReviewRunService {
 		log.info("code review: PMD found {} finding(s) across the reviewed files of {} on {}", findings.size(),
 				repository.slug(), branch.branchName());
 
-		wrap.insertNewData(new CodeReviewBranchFilesResult(repository.slug(), branch.branchName(),
-				tree.head().sha(), tree.truncated(), totalFiles, findings));
+		var result = new CodeReviewBranchFilesResult(repository.slug(), branch.branchName(),
+				tree.head().sha(), tree.truncated(), totalFiles, findings);
+		// Persist the completed review as a flat jsonb row. Done after all GitHub/analysis work, in its own
+		// short transaction; a persistence failure is logged but never fails the response that already holds
+		// the result.
+		recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.COMPLETED, result);
+
+		wrap.insertNewData(result);
 		wrap.setStatus(true);
 		return wrap;
+	}
+
+	/**
+	 * Persists one whole-branch outcome, swallowing any persistence failure. The computed result has already
+	 * been assembled and is about to be returned to the caller, so a database problem here must be logged and
+	 * not raised — losing the row is worse than failing the request would be worth. {@code completedAt} is
+	 * taken here so it reflects the moment the review actually finished.
+	 */
+	private void recordBranchResult(Long repositoryId, Long branchId, Instant startedAt,
+			BranchReviewStatus status, CodeReviewBranchFilesResult result) {
+		try {
+			persistence.saveBranchResult(repositoryId, branchId, startedAt, Instant.now(), status, result);
+		} catch (RuntimeException e) {
+			log.warn("code review: could not persist branch result for repository {} branch {}", repositoryId,
+					branchId, e);
+		}
 	}
 
 	/**
