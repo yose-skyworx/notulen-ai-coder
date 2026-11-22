@@ -93,12 +93,18 @@ public class CodeReviewRunPersistence {
 	private static final TypeReference<Map<String, Object>> JSON_MAP = new TypeReference<>() {
 	};
 
+	/**
+	 * Local Jackson (2.x) mapper, used only to convert the whole-branch result into the {@code jsonb} map.
+	 * Spring Boot 4 auto-configures a Jackson 3 mapper, so no {@code com.fasterxml.jackson.databind.ObjectMapper}
+	 * bean exists to inject — same as {@link GithubApiClient}.
+	 */
+	private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
 	private final EntityManager em;
 	private final CriteriaBuilderFactory configBuilder;
 	private final EntityViewManager viewManager;
 	private final StatusService statusService;
 	private final FindingValidator findingValidator;
-	private final ObjectMapper objectMapper;
 
 	// ------------------------------------------------------------------ shared records
 
@@ -141,9 +147,10 @@ public class CodeReviewRunPersistence {
 	 * @param completedAt  when the trigger finished
 	 * @param status       the outcome; {@code COMPLETED} carries a {@code result}, {@code FAILED} does not
 	 * @param result       the whole-branch result to store as jsonb, or null for a failed attempt
+	 * @return the generated row id, so the caller can later attach a report to the same row
 	 */
 	@Transactional
-	public void saveBranchResult(Long repositoryId, Long branchId, Instant startedAt, Instant completedAt,
+	public Long saveBranchResult(Long repositoryId, Long branchId, Instant startedAt, Instant completedAt,
 			BranchReviewStatus status, CodeReviewBranchFilesResult result) {
 		var row = new CodeReviewBranchResult();
 		row.setRepository(em.getReference(CodeRepository.class, repositoryId));
@@ -151,10 +158,35 @@ public class CodeReviewRunPersistence {
 		row.setStartedAt(startedAt);
 		row.setCompletedAt(completedAt);
 		row.setStatus(status);
-		row.setResult(result == null ? null : objectMapper.convertValue(result, JSON_MAP));
+		row.setResult(result == null ? null : OBJECT_MAPPER.convertValue(result, JSON_MAP));
 		em.persist(row);
 		// Flush inside the transaction so a jsonb/constraint failure surfaces here rather than after the
-		// caller has already returned the result to the client.
+		// caller has already returned the result to the client, and so the generated id is available.
+		em.flush();
+		return row.getId();
+	}
+
+	/**
+	 * Attaches the generated report text to an already-persisted branch-result row, in its own short
+	 * transaction. Separate from {@link #saveBranchResult} on purpose: the report comes from an LLM call,
+	 * which the caller makes untransactioned after the row is committed, so writing it is its own unit of
+	 * work rather than a connection held across that remote call.
+	 * <p>
+	 * A missing row (e.g. deleted between the two steps) is a no-op logged at debug, not an error — the
+	 * review itself already succeeded and the report is a best-effort enrichment.
+	 *
+	 * @param id         the row returned by {@link #saveBranchResult}
+	 * @param reportText the rendered report; stored as-is on {@code report_text}
+	 */
+	@Transactional
+	public void updateBranchReport(Long id, String reportText) {
+		var row = em.find(CodeReviewBranchResult.class, id);
+		if (row == null) {
+			log.debug("code review: branch result {} is gone, report not stored", id);
+			return;
+		}
+		// Managed entity: dirty checking writes the column on commit; flush to surface any failure here.
+		row.setReportText(reportText);
 		em.flush();
 	}
 

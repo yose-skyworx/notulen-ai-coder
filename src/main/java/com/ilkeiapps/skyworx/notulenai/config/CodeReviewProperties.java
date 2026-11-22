@@ -253,5 +253,35 @@ public class CodeReviewProperties {
 		 * the ceiling, which is only advisable for a repository whose size is already known to be small.
 		 */
 		private int maxFiles = 200;
+
+		private Report report = new Report();
+
+		/**
+		 * Whether a whole-branch trigger generates the Bahasa Indonesia report via the LLM and stores it on
+		 * {@code code_review_branch_results.report_text}.
+		 * <p>
+		 * Deliberately <b>separate from {@code code-review.inference.enabled}</b>. That flag selects the
+		 * scheduled run's {@link com.ilkeiapps.skyworx.notulenai.service.ReviewAgent} implementation, and only
+		 * the disabled one exists today, so turning it on leaves the context with no {@code ReviewAgent} bean
+		 * and the application fails to start. The branch report reaches the model through Embabel directly, so
+		 * it does not need — and must not depend on — that switch.
+		 * <p>
+		 * On by default: the branch trigger is an explicit, on-demand action, and the report is its point. It
+		 * is best-effort regardless — a model or persistence failure leaves {@code report_text} null and never
+		 * fails the response — so the deterministic findings are always saved whether or not this is set.
+		 */
+		@Setter
+		@Getter
+		public static class Report {
+			private boolean enabled = true;
+
+			/**
+			 * Maximum tokens the model may generate for the report. Without it the call uses the provider's
+			 * small default, which cuts the report off mid-sentence; this bounds the length while leaving room
+			 * to finish. Raising it lets the report run longer at the cost of latency and, on a small model,
+			 * more rambling.
+			 */
+			private int maxOutputTokens = 1024;
+		}
 	}
 }

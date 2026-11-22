@@ -12,6 +12,8 @@ import org.springframework.stereotype.Service;
 
 import com.ilkeiapps.ilkeitool.validator.IlKeiValidator;
 import com.ilkeiapps.ilkeitool.validator.ProcessResult;
+import com.embabel.agent.api.invocation.AgentInvocation;
+import com.embabel.agent.core.AgentPlatform;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.BranchReviewStatus;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.DiffSide;
 import com.ilkeiapps.skyworx.notulenai.bean.enums.FileChangeStatus;
@@ -22,6 +24,8 @@ import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchFilesResult.Bran
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchFilesResult.ClassifiedBranchFile;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewBranchTriggerRequest;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewProjectTriggerRequest;
+import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewReport;
+import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewReportInput;
 import com.ilkeiapps.skyworx.notulenai.bean.web.CodeReviewRunResult;
 import com.ilkeiapps.skyworx.notulenai.config.CodeReviewProperties;
 import com.ilkeiapps.skyworx.notulenai.service.ChangedFileClassifier.ClassifiedFile;
@@ -135,6 +139,7 @@ public class CodeReviewRunService {
 	private final ReviewContextBuilder reviewContextBuilder;
 	private final ReviewAgent reviewAgent;
 	private final PmdService pmdService;
+	private final AgentPlatform agentPlatform;
 
 	// ------------------------------------------------------------------ entry point
 
@@ -384,7 +389,17 @@ public class CodeReviewRunService {
 		// Persist the completed review as a flat jsonb row. Done after all GitHub/analysis work, in its own
 		// short transaction; a persistence failure is logged but never fails the response that already holds
 		// the result.
-		recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.COMPLETED, result);
+		var rowId = recordBranchResult(repository.id(), branch.id(), startedAt, BranchReviewStatus.COMPLETED, result);
+
+		// Generate and store the Indonesian report when the branch-report flag is on. Gated on its own flag,
+		// not code-review.inference.enabled: that switch selects the scheduled run's ReviewAgent, of which
+		// only the disabled impl exists, so enabling it would leave the context without that bean. This is a
+		// remote LLM call, so it runs here — outside any transaction — and its result is written to the
+		// already-committed row in a second short transaction. Best-effort: a model or persistence failure
+		// leaves report_text null and never affects the response.
+		if (rowId != null && properties.getBranchReview().getReport().isEnabled()) {
+			generateAndStoreReport(rowId, result);
+		}
 
 		wrap.insertNewData(result);
 		wrap.setStatus(true);
@@ -396,14 +411,43 @@ public class CodeReviewRunService {
 	 * been assembled and is about to be returned to the caller, so a database problem here must be logged and
 	 * not raised — losing the row is worse than failing the request would be worth. {@code completedAt} is
 	 * taken here so it reflects the moment the review actually finished.
+	 *
+	 * @return the persisted row's id, or null if persistence failed
 	 */
-	private void recordBranchResult(Long repositoryId, Long branchId, Instant startedAt,
+	private Long recordBranchResult(Long repositoryId, Long branchId, Instant startedAt,
 			BranchReviewStatus status, CodeReviewBranchFilesResult result) {
 		try {
-			persistence.saveBranchResult(repositoryId, branchId, startedAt, Instant.now(), status, result);
+			return persistence.saveBranchResult(repositoryId, branchId, startedAt, Instant.now(), status, result);
 		} catch (RuntimeException e) {
 			log.warn("code review: could not persist branch result for repository {} branch {}", repositoryId,
 					branchId, e);
+			return null;
+		}
+	}
+
+	/**
+	 * Invokes the report agent on the review's findings and stores the resulting Indonesian text on the saved
+	 * row. Best-effort end to end: the LLM invocation and the follow-up write are each guarded, because the
+	 * review has already succeeded and been returned — a report is an enrichment, not part of the contract, so
+	 * a model error, a planning failure, or a write failure must only be logged.
+	 */
+	private void generateAndStoreReport(Long rowId, CodeReviewBranchFilesResult result) {
+		try {
+			var input = new CodeReviewReportInput(result.repository(), result.branchName(), result.totalFiles(),
+					result.findings());
+			var report = AgentInvocation.create(agentPlatform, CodeReviewReport.class).invoke(input);
+			if (report == null || report.getText() == null || report.getText().isBlank()) {
+				log.warn("code review: report generation produced no text for {} on {}", result.repository(),
+						result.branchName());
+				return;
+			}
+			persistence.updateBranchReport(rowId, report.getText());
+		} catch (Exception e) {
+			// Broad on purpose, as in KnowledgeRagService: AgentInvocation surfaces planning/LLM failures as
+			// checked exceptions, and this is a best-effort enrichment after a review that already succeeded,
+			// so every failure here is logged and swallowed rather than propagated.
+			log.warn("code review: could not generate or store the report for {} on {}", result.repository(),
+					result.branchName(), e);
 		}
 	}
 
