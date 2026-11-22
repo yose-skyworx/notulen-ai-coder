@@ -16,24 +16,20 @@ import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
  * {@code truncated} is GitHub's own cap on a recursive tree (100,000 entries or 7 MB) surfaced rather than
  * swallowed: when true, the branch holds more files than {@code files} names.
  * <p>
- * {@code files} lists only the files that were reviewed — those that classified to a service, controller,
- * or entity role. A file GitHub listed that is not Java, or is Java but plays none of those roles, is
- * counted in {@code totalFiles} but not listed, so the response carries the branch's size without the noise
- * of every skipped path. {@code findings} holds every PMD violation across those reviewed files, each naming
- * the file it was found in; it is empty when the rules found nothing.
+ * A file GitHub listed that is not Java, or is Java but plays none of the reviewed roles, is counted in
+ * {@code totalFiles} but not reviewed. {@code findings} holds every PMD violation across the reviewed files,
+ * each naming the file it was found in; it is empty when the rules found nothing.
  *
  * @param repository the {@code owner/repo} slug the branch belongs to
  * @param branchName the branch that was listed
  * @param headSha    the commit SHA the tree listing was pinned to
  * @param truncated  true when GitHub capped the listing, so the branch holds more than was seen
  * @param totalFiles the number of files the branch holds at {@code headSha}, reviewed and skipped alike
- * @param files      the files that classified to a role and were reviewed, in the order GitHub reported
- *                   them; skipped files are not listed
  * @param findings   every PMD violation found across the reviewed files, in file-then-rule order; empty
  *                   when nothing fired
  */
 public record CodeReviewBranchFilesResult(String repository, String branchName, String headSha,
-		boolean truncated, int totalFiles, List<ClassifiedBranchFile> files, List<BranchFinding> findings) {
+		boolean truncated, int totalFiles, List<BranchFinding> findings) {
 
 	/**
 	 * One reviewed file and the role it was classified as.
@@ -50,12 +46,15 @@ public record CodeReviewBranchFilesResult(String repository, String branchName, 
 	 *
 	 * @param path      repository-relative path of the file the violation was found in
 	 * @param ruleName  the PMD rule that fired, e.g. {@code NoRestCallInTransaction}
+	 * @param code      the rule's stable, language-neutral identifier, e.g. {@code SKY-TRANSACTION-003}
 	 * @param message   the rule's violation message
 	 * @param beginLine first line of the offending construct, 1-based
 	 * @param endLine   last line of it, 1-based
 	 * @param priority  PMD priority, 1 (most severe) to 5
+	 * @param evidence  the trimmed source line(s) around {@code beginLine} in the snapshot, with the
+	 *                  annotations above it, so the finding shows the offending code without opening the file
 	 */
-	public record BranchFinding(String path, String ruleName, String message, int beginLine, int endLine,
-			int priority) {
+	public record BranchFinding(String path, String ruleName, String code, String message, int beginLine,
+			int endLine, int priority, String evidence) {
 	}
 }

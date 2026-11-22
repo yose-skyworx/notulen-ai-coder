@@ -7,6 +7,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
 import com.ilkeiapps.skyworx.notulenai.service.PmdService.PmdViolation;
 
 /**
@@ -29,7 +30,7 @@ class PmdServiceTest {
 	private final PmdService pmd = new PmdService();
 
 	private List<PmdViolation> analyse(String source) {
-		return pmd.analyse("src/main/java/com/example/Subject.java", source);
+		return pmd.analyse(ReviewRoleType.SERVICE, "src/main/java/com/example/Subject.java", source);
 	}
 
 	@Test
@@ -225,14 +226,15 @@ class PmdServiceTest {
 	/** PMD selects the language from the extension and rejects anything else; this mechanism is Java-only. */
 	@Test
 	void doesNotAnalyseANonJavaPath() {
-		assertTrue(pmd.analyse("src/main/resources/db/schema.sql", "@Transactional SELECT 1;").isEmpty());
-		assertTrue(pmd.analyse("README", "@Transactional").isEmpty());
+		assertTrue(pmd.analyse(ReviewRoleType.SERVICE, "src/main/resources/db/schema.sql",
+				"@Transactional SELECT 1;").isEmpty());
+		assertTrue(pmd.analyse(ReviewRoleType.SERVICE, "README", "@Transactional").isEmpty());
 	}
 
 	@Test
 	void returnsNothingForBlankSource() {
-		assertTrue(pmd.analyse("src/main/java/com/example/Empty.java", "").isEmpty());
-		assertTrue(pmd.analyse("src/main/java/com/example/Empty.java", "   ").isEmpty());
+		assertTrue(pmd.analyse(ReviewRoleType.SERVICE, "src/main/java/com/example/Empty.java", "").isEmpty());
+		assertTrue(pmd.analyse(ReviewRoleType.SERVICE, "src/main/java/com/example/Empty.java", "   ").isEmpty());
 	}
 
 	// ----------------------------------------------------------- NonAdvisableTransactionalMethod (Rule 2)
@@ -561,5 +563,382 @@ class PmdServiceTest {
 				"""), RULE_REST);
 
 		assertTrue(found.isEmpty(), "an unresolved receiver is never a confirmed violation: " + found);
+	}
+
+	// ------------------------------------------------------ ServiceMethodCyclomaticComplexity (Rule 4)
+
+	private static final String RULE_CYCLO = "ServiceMethodCyclomaticComplexity";
+
+	/** Sixteen branches (complexity 17) is over the threshold of 15, so the method is flagged. */
+	@Test
+	void flagsAServiceMethodOverTheComplexityThreshold() {
+		var found = only(analyse("""
+				package com.example;
+
+				public class Subject {
+					public int classify(int n) {
+						if (n == 1) return 1;
+						if (n == 2) return 2;
+						if (n == 3) return 3;
+						if (n == 4) return 4;
+						if (n == 5) return 5;
+						if (n == 6) return 6;
+						if (n == 7) return 7;
+						if (n == 8) return 8;
+						if (n == 9) return 9;
+						if (n == 10) return 10;
+						if (n == 11) return 11;
+						if (n == 12) return 12;
+						if (n == 13) return 13;
+						if (n == 14) return 14;
+						if (n == 15) return 15;
+						if (n == 16) return 16;
+						return 0;
+					}
+				}
+				"""), RULE_CYCLO);
+
+		assertEquals(1, found.size());
+		// Reported on the method declaration line, where the method would be split.
+		assertEquals(4, found.getFirst().beginLine());
+	}
+
+	@Test
+	void doesNotFlagASimpleServiceMethod() {
+		assertTrue(only(analyse("""
+				package com.example;
+
+				public class Subject {
+					public int classify(int n) {
+						if (n < 0) return -1;
+						if (n == 0) return 0;
+						return 1;
+					}
+				}
+				"""), RULE_CYCLO).isEmpty());
+	}
+
+	/** Cyclomatic complexity is a service concern; an entity file is not measured against it. */
+	@Test
+	void doesNotMeasureComplexityOnAnEntityFile() {
+		var all = analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				public class Subject {
+					public int classify(int n) {
+						if (n == 1) return 1;
+						if (n == 2) return 2;
+						if (n == 3) return 3;
+						if (n == 4) return 4;
+						if (n == 5) return 5;
+						if (n == 6) return 6;
+						if (n == 7) return 7;
+						if (n == 8) return 8;
+						if (n == 9) return 9;
+						if (n == 10) return 10;
+						if (n == 11) return 11;
+						if (n == 12) return 12;
+						if (n == 13) return 13;
+						if (n == 14) return 14;
+						if (n == 15) return 15;
+						if (n == 16) return 16;
+						return 0;
+					}
+				}
+				""");
+
+		assertTrue(only(all, RULE_CYCLO).isEmpty(), "complexity is a service rule: " + all);
+	}
+
+	// ----------------------------------------------------------------------- routing by role
+
+	private List<PmdViolation> analyse(ReviewRoleType role, String source) {
+		return pmd.analyse(role, "src/main/java/com/example/Subject.java", source);
+	}
+
+	/**
+	 * The point of routing: a service rule must not run on a controller or entity file. A class-level
+	 * {@code @Transactional} is a {@code ClassLevelTransactional} finding for a service, but a controller is
+	 * judged by its own rule, so the service rule's name must never appear in a controller's findings.
+	 */
+	@Test
+	void doesNotRunServiceRulesOnAControllerFile() {
+		var all = analyse(ReviewRoleType.CONTROLLER, """
+				package com.example;
+
+				import org.springframework.transaction.annotation.Transactional;
+
+				@Transactional
+				public class Subject {
+					public void save() { }
+				}
+				""");
+
+		assertTrue(only(all, RULE).isEmpty(), "ClassLevelTransactional is a service rule: " + all);
+	}
+
+	@Test
+	void returnsNothingWhenRoleIsNull() {
+		assertTrue(pmd.analyse(null, "src/main/java/com/example/Subject.java", """
+				package com.example;
+
+				import org.springframework.transaction.annotation.Transactional;
+
+				@Transactional
+				public class Subject { }
+				""").isEmpty());
+	}
+
+	// ------------------------------------------------------------- NoTransactionalInController (controller)
+
+	private static final String RULE_CONTROLLER = "NoTransactionalInController";
+
+	@Test
+	void flagsClassLevelTransactionalOnAController() {
+		var found = only(analyse(ReviewRoleType.CONTROLLER, """
+				package com.example;
+
+				import org.springframework.transaction.annotation.Transactional;
+				import org.springframework.web.bind.annotation.RestController;
+
+				@RestController
+				@Transactional
+				public class Subject {
+					public void save() { }
+				}
+				"""), RULE_CONTROLLER);
+
+		assertEquals(1, found.size());
+		assertEquals(8, found.getFirst().beginLine());
+	}
+
+	/** A controller must not open a transaction even on a method — unlike a service, where that is correct. */
+	@Test
+	void flagsMethodLevelTransactionalOnAController() {
+		var found = only(analyse(ReviewRoleType.CONTROLLER, """
+				package com.example;
+
+				import org.springframework.transaction.annotation.Transactional;
+
+				public class Subject {
+					@Transactional
+					public void save() { }
+				}
+				"""), RULE_CONTROLLER);
+
+		assertEquals(1, found.size());
+		assertEquals(7, found.getFirst().beginLine());
+	}
+
+	@Test
+	void doesNotFlagAControllerWithoutAnyTransactionAnnotation() {
+		assertTrue(only(analyse(ReviewRoleType.CONTROLLER, """
+				package com.example;
+
+				import org.springframework.web.bind.annotation.RestController;
+
+				@RestController
+				public class Subject {
+					public void save() { }
+				}
+				"""), RULE_CONTROLLER).isEmpty());
+	}
+
+	/** The simple-name false positive: a project's own Transactional is not Spring's or Jakarta's. */
+	@Test
+	void doesNotFlagAnUnrelatedTransactionalOnAController() {
+		assertTrue(only(analyse(ReviewRoleType.CONTROLLER, """
+				package com.example;
+
+				import com.example.own.Transactional;
+
+				@Transactional
+				public class Subject {
+					public void save() { }
+				}
+				"""), RULE_CONTROLLER).isEmpty());
+	}
+
+	// --------------------------------------------------------------------- LombokDataOnEntity (entity)
+
+	private static final String RULE_DATA = "LombokDataOnEntity";
+
+	@Test
+	void flagsLombokDataOnAnEntity() {
+		var found = only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import jakarta.persistence.Entity;
+				import lombok.Data;
+
+				@Entity
+				@Data
+				public class Subject {
+					private Long id;
+				}
+				"""), RULE_DATA);
+
+		assertEquals(1, found.size());
+		assertEquals(8, found.getFirst().beginLine());
+	}
+
+	/** @Data on a plain class that is not a persistence model is out of this rule's scope. */
+	@Test
+	void doesNotFlagLombokDataOnANonEntity() {
+		assertTrue(only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import lombok.Data;
+
+				@Data
+				public class Subject {
+					private Long id;
+				}
+				"""), RULE_DATA).isEmpty());
+	}
+
+	/** An unrelated @Data that is not Lombok's must not be flagged even on an entity. */
+	@Test
+	void doesNotFlagAnUnrelatedDataAnnotationOnAnEntity() {
+		assertTrue(only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import jakarta.persistence.Entity;
+				import com.example.own.Data;
+
+				@Entity
+				@Data
+				public class Subject { }
+				"""), RULE_DATA).isEmpty());
+	}
+
+	// --------------------------------------------------------------------- EagerFetchOnEntity (entity)
+
+	private static final String RULE_EAGER = "EagerFetchOnEntity";
+
+	@Test
+	void flagsEagerFetchOnARelationship() {
+		var found = only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import jakarta.persistence.Entity;
+				import jakarta.persistence.FetchType;
+				import jakarta.persistence.ManyToOne;
+
+				@Entity
+				public class Subject {
+					@ManyToOne(fetch = FetchType.EAGER)
+					private Subject parent;
+				}
+				"""), RULE_EAGER);
+
+		assertEquals(1, found.size());
+		assertEquals(9, found.getFirst().beginLine());
+		// The finding carries the offending line itself, trimmed, so a reviewer sees the code.
+		assertEquals("@ManyToOne(fetch = FetchType.EAGER)", found.getFirst().evidence());
+	}
+
+	/**
+	 * Evidence reaches up over the annotation above the reported line, so the subject that fired — the
+	 * {@code @Transactional}, not just the class declaration it sits on — is visible. It is also the whole
+	 * line, trimmed, even when tab-indented: a column slice would mis-cut because PMD can report a column past
+	 * the raw tab offset.
+	 */
+	@Test
+	void evidenceCarriesTheAnnotationThatWasFlagged() {
+		var found = analyse("""
+				package com.example;
+
+				import org.springframework.transaction.annotation.Transactional;
+
+				@Transactional
+				public class Subject {
+					public void save() { }
+				}
+				""");
+
+		assertEquals(1, found.size());
+		assertEquals("@Transactional\npublic class Subject {", found.getFirst().evidence());
+	}
+
+	/** Every finding carries the rule's stable, language-neutral code alongside its name. */
+	@Test
+	void carriesTheStableRuleCode() {
+		var found = analyse("""
+				package com.example;
+
+				import org.springframework.transaction.annotation.Transactional;
+
+				@Transactional
+				public class Subject {
+					public void save() { }
+				}
+				""");
+
+		assertEquals(1, found.size());
+		assertEquals("SKY-TRANSACTION-001", found.getFirst().code());
+	}
+
+	@Test
+	void doesNotFlagLazyFetch() {
+		assertTrue(only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import jakarta.persistence.Entity;
+				import jakarta.persistence.FetchType;
+				import jakarta.persistence.ManyToOne;
+
+				@Entity
+				public class Subject {
+					@ManyToOne(fetch = FetchType.LAZY)
+					private Subject parent;
+				}
+				"""), RULE_EAGER).isEmpty());
+	}
+
+	/** A constant named EAGER that is not FetchType must not be flagged: matched by type, not by name. */
+	@Test
+	void doesNotFlagAnUnrelatedConstantNamedEager() {
+		assertTrue(only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import jakarta.persistence.Entity;
+
+				@Entity
+				public class Subject {
+					private Mode mode = Mode.EAGER;
+				}
+
+				enum Mode { EAGER, LAZY }
+				"""), RULE_EAGER).isEmpty());
+	}
+
+	// ------------------------------------------------------------------------ EntityAsRecord (entity)
+
+	private static final String RULE_RECORD = "EntityAsRecord";
+
+	@Test
+	void flagsAnEntityDeclaredAsARecord() {
+		var found = only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				import jakarta.persistence.Entity;
+
+				@Entity
+				public record Subject(Long id) { }
+				"""), RULE_RECORD);
+
+		assertEquals(1, found.size());
+		assertEquals(6, found.getFirst().beginLine());
+	}
+
+	/** A plain record used as a projection or value carrier, with no persistence annotation, is fine. */
+	@Test
+	void doesNotFlagANonEntityRecord() {
+		assertTrue(only(analyse(ReviewRoleType.ENTITY, """
+				package com.example;
+
+				public record Subject(Long id, String name) { }
+				"""), RULE_RECORD).isEmpty());
 	}
 }

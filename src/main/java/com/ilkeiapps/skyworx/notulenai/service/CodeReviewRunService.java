@@ -369,7 +369,7 @@ public class CodeReviewRunService {
 				repository.slug(), branch.branchName());
 
 		wrap.insertNewData(new CodeReviewBranchFilesResult(repository.slug(), branch.branchName(),
-				tree.head().sha(), tree.truncated(), totalFiles, files, findings));
+				tree.head().sha(), tree.truncated(), totalFiles, findings));
 		wrap.setStatus(true);
 		return wrap;
 	}
@@ -405,9 +405,9 @@ public class CodeReviewRunService {
 					log.info("pmd: {} is too large to analyse, skipped", path);
 					continue;
 				}
-				for (PmdViolation violation : pmdService.analyse(path, content.get().text())) {
-					findings.add(new BranchFinding(path, violation.ruleName(), violation.message(),
-							violation.beginLine(), violation.endLine(), violation.priority()));
+				for (PmdViolation violation : pmdService.analyse(file.role(), path, content.get().text())) {
+					findings.add(new BranchFinding(path, violation.ruleName(), violation.code(), violation.message(),
+							violation.beginLine(), violation.endLine(), violation.priority(), violation.evidence()));
 				}
 			} catch (RuntimeException e) {
 				// One file's fetch or analysis failing must not abandon the rest of the branch.
