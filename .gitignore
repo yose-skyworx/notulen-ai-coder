@@ -34,3 +34,9 @@ build/
 
 # Runtime-uploaded document storage (local MinIO fallback)
 storage/
+
+# Markdown docs — kept local, never published
+*.md
+
+# Database / knowledge-base exports (contain real document content)
+*.csv
