@@ -6,15 +6,16 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * A single normalized document element produced by the normalization layer from Tika's Markdown, before
- * it is persisted as a {@code DocumentElement}. Carries structure and provenance (sequence, heading
- * level, page/slide, parent linkage by sequence index). Internal processing holder, not a REST DTO.
+ * A single normalized document element produced by the normalization layer from the conversion
+ * service's {@code elements} array, before it is persisted as a {@code DocumentElement}. Carries
+ * structure and provenance (sequence, heading level, page/slide, parent linkage by sequence index).
+ * Internal processing holder, not a REST DTO.
  */
 @Setter
 @Getter
 public class NormalizedElement {
 
-	/** DOCUMENT, HEADING, PARAGRAPH, TABLE, TABLE_ROW, LIST, IMAGE, FOOTNOTE, OTHER. */
+	/** DOCUMENT, HEADING, PARAGRAPH, LIST, TABLE; OTHER for a type the converter did not name. */
 	private String elementType;
 
 	/** Position in the original extraction order (0-based). */

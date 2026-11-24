@@ -250,6 +250,8 @@ public class CodeReviewRunPersistence {
 		run.setSelectedCommitSha(commit.sha());
 		run.setParentCommitSha(parentSha);
 		run.setCommitMessage(truncate(commit.message(), 2048));
+		run.setAuthor(truncate(commit.authorName(), 255));
+		run.setAuthorDate(commit.authorDate());
 		run.setCommitter(truncate(commit.committerName(), 255));
 		run.setCommitDate(commit.committerDate());
 		run.setUpdatedAt(Instant.now());

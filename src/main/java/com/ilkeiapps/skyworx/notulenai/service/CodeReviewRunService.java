@@ -380,12 +380,13 @@ public class CodeReviewRunService {
 
 		// 5. Fetch each classified file at the pinned head SHA and run the deterministic PMD rule set over it.
 		//    No model is involved, so this stage runs whether or not inference is enabled.
-		var findings = analyseClassifiedFiles(repository, tree.head().sha(), files);
+		var findings = analyseClassifiedFiles(repository, tree.head(), files);
 		log.info("code review: PMD found {} finding(s) across the reviewed files of {} on {}", findings.size(),
 				repository.slug(), branch.branchName());
 
-		var result = new CodeReviewBranchFilesResult(repository.slug(), branch.branchName(),
-				tree.head().sha(), tree.truncated(), totalFiles, findings);
+		var head = tree.head();
+		var result = new CodeReviewBranchFilesResult(repository.slug(), branch.branchName(), head.sha(),
+				tree.truncated(), totalFiles, head.authorName(), head.committerName(), null, findings);
 		// Persist the completed review as a flat jsonb row. Done after all GitHub/analysis work, in its own
 		// short transaction; a persistence failure is logged but never fails the response that already holds
 		// the result.
@@ -398,7 +399,10 @@ public class CodeReviewRunService {
 		// already-committed row in a second short transaction. Best-effort: a model or persistence failure
 		// leaves report_text null and never affects the response.
 		if (rowId != null && properties.getBranchReview().getReport().isEnabled()) {
-			generateAndStoreReport(rowId, result);
+			var reportText = generateAndStoreReport(rowId, result);
+			if (reportText != null) {
+				result = result.withReportText(reportText);
+			}
 		}
 
 		wrap.insertNewData(result);
@@ -430,8 +434,11 @@ public class CodeReviewRunService {
 	 * row. Best-effort end to end: the LLM invocation and the follow-up write are each guarded, because the
 	 * review has already succeeded and been returned — a report is an enrichment, not part of the contract, so
 	 * a model error, a planning failure, or a write failure must only be logged.
+	 *
+	 * @return the generated report text, so the caller can attach it to the returned result, or null when
+	 *         the model produced nothing or the attempt failed
 	 */
-	private void generateAndStoreReport(Long rowId, CodeReviewBranchFilesResult result) {
+	private String generateAndStoreReport(Long rowId, CodeReviewBranchFilesResult result) {
 		try {
 			var input = new CodeReviewReportInput(result.repository(), result.branchName(), result.totalFiles(),
 					result.findings());
@@ -439,15 +446,17 @@ public class CodeReviewRunService {
 			if (report == null || report.getText() == null || report.getText().isBlank()) {
 				log.warn("code review: report generation produced no text for {} on {}", result.repository(),
 						result.branchName());
-				return;
+				return null;
 			}
 			persistence.updateBranchReport(rowId, report.getText());
+			return report.getText();
 		} catch (Exception e) {
 			// Broad on purpose, as in KnowledgeRagService: AgentInvocation surfaces planning/LLM failures as
 			// checked exceptions, and this is a best-effort enrichment after a review that already succeeded,
 			// so every failure here is logged and swallowed rather than propagated.
 			log.warn("code review: could not generate or store the report for {} on {}", result.repository(),
 					result.branchName(), e);
+			return null;
 		}
 	}
 
@@ -464,8 +473,9 @@ public class CodeReviewRunService {
 	 * review pipeline applies. {@link PmdService#analyse} is in-memory and deterministic, and every GitHub
 	 * read here runs outside any transaction, as all of this class does.
 	 */
-	private List<BranchFinding> analyseClassifiedFiles(RepositoryRef repository, String headSha,
+	private List<BranchFinding> analyseClassifiedFiles(RepositoryRef repository, CommitInfo head,
 			List<ClassifiedBranchFile> files) {
+		var headSha = head.sha();
 		var findings = new ArrayList<BranchFinding>();
 		for (ClassifiedBranchFile file : files) {
 			if (file.role() == null) {
@@ -482,9 +492,17 @@ public class CodeReviewRunService {
 					log.info("pmd: {} is too large to analyse, skipped", path);
 					continue;
 				}
-				for (PmdViolation violation : pmdService.analyse(file.role(), path, content.get().text())) {
+				var violations = pmdService.analyse(file.role(), path, content.get().text());
+				if (violations.isEmpty()) {
+					continue;
+				}
+				// Only files that actually have findings cost the extra per-file attribution call.
+				var attribution = resolvePathAttribution(repository, head, path);
+				for (PmdViolation violation : violations) {
 					findings.add(new BranchFinding(path, violation.ruleName(), violation.code(), violation.message(),
-							violation.beginLine(), violation.endLine(), violation.priority(), violation.evidence()));
+							violation.beginLine(), violation.endLine(), violation.priority(), violation.evidence(),
+							attribution.author(), attribution.committer(), attribution.authorDate(),
+							attribution.committerDate()));
 				}
 			} catch (RuntimeException e) {
 				// One file's fetch or analysis failing must not abandon the rest of the branch.
@@ -492,6 +510,30 @@ public class CodeReviewRunService {
 			}
 		}
 		return findings;
+	}
+
+	/**
+	 * Resolves who last changed a file, for attributing its findings. Costs one GitHub call per file that
+	 * has findings — not per file in the branch — looking up the latest commit that touched the path at the
+	 * reviewed head. An empty history or any failure falls back to the head commit's author/committer, so
+	 * attribution degrades to the branch head rather than dropping the file's findings.
+	 */
+	private PathAttribution resolvePathAttribution(RepositoryRef repository, CommitInfo head, String path) {
+		try {
+			var last = githubApiClient.lastCommitForPath(repository.owner(), repository.repoName(), head.sha(), path);
+			if (last.isPresent()) {
+				var c = last.get();
+				return new PathAttribution(c.authorName(), c.committerName(), c.authorDate(), c.committerDate());
+			}
+		} catch (RuntimeException e) {
+			log.debug("code review: last-commit lookup for {} at {} failed, using head attribution", path,
+					head.sha(), e);
+		}
+		return new PathAttribution(head.authorName(), head.committerName(), head.authorDate(), head.committerDate());
+	}
+
+	/** A file's resolved attribution: who last authored and committed a change to it, and when. */
+	private record PathAttribution(String author, String committer, Instant authorDate, Instant committerDate) {
 	}
 
 	// ------------------------------------------------------------------ one run

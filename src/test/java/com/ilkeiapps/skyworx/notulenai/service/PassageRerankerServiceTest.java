@@ -94,6 +94,23 @@ class PassageRerankerServiceTest {
 	private static final double TAIL_SCORE = 0.5354265730210177;
 	private static final double KNOW_YOUR_APP_SCORE = 0.5337731201919174;
 
+	private static final String WHAT_IS_CBAS_QUESTION = "apa itu CBAS";
+
+	/**
+	 * Closest by cosine similarity for {@link #WHAT_IS_CBAS_QUESTION}: a short, keyword-dense navigation
+	 * table where {@code CBAS} appears in a menu label. After the move to OCR-based extraction these table
+	 * rows out-cosine the prose definition, and because {@code apa itu CBAS} leaves the single term
+	 * {@code cbas}, every "cbas" line ties on term count — so without the definition bonus this row's cosine
+	 * wins and the model is handed {@code Rekap CBAS} instead of the sentence that defines CBAS. The cosine
+	 * is the exact value production returned for this row.
+	 */
+	private static final String NAV_CHUNK = """
+			Klik Report > Rekap CBAS |
+			Klik Search untuk mencari data |
+			Filter data 1. Klik button filter 2. Input data yang ingin dicari 3. Klik button search untuk mencari data, atau klik tombol reset untuk menghilangkan data di form advance search |
+			""";
+	private static final double NAV_SCORE = 0.7229047582802436;
+
 	private static final String LOGIN_QUESTION = "apa yang diinput di halaman login";
 
 	/**
@@ -244,6 +261,99 @@ class PassageRerankerServiceTest {
 		// The steps are numbered fragments, not prose sentences, so they are kept and the next section is not.
 		assertFalse(passage.text().contains("DASHBOARD"), passage.text());
 		assertFalse(passage.text().contains("Berfungsi untuk menyetujui"), passage.text());
+	}
+
+	@Test
+	void definesTheTermFromAProseSentenceOverAHigherCosineNavigationRow() {
+		// The nav row is closest by cosine and mentions CBAS; the definition sentence sits in a
+		// lower-cosine chunk. "apa itu CBAS" reduces to the single term "cbas", so both lines tie on term
+		// count and only the definition bonus can lift the real definition above the nav row's cosine.
+		var context = reranker.select(WHAT_IS_CBAS_QUESTION, List.of(
+				chunk(1L, NAV_CHUNK, NAV_SCORE),
+				chunk(98L, KNOW_YOUR_APP_CHUNK, KNOW_YOUR_APP_SCORE)));
+
+		assertEquals(1, context.getPassages().size());
+		var passage = context.getPassages().getFirst();
+		assertEquals(98L, passage.source().getChunkId());
+		assertEquals(2, passage.sourceNumber());
+		// The defining sentence, carrying its "Know Your App" section heading as context.
+		assertTrue(passage.text().contains("CBAS (Credit Bureau Automation System) merupakan"), passage.text());
+		assertTrue(passage.text().startsWith("Know Your App"), passage.text());
+		// The nav row must not be what the model is handed.
+		assertFalse(passage.text().contains("Rekap CBAS"), passage.text());
+		// Base term match (2.0) + definition bonus (3.0) + the chunk's cosine, clear of the nav row's score.
+		assertEquals(5.0 + KNOW_YOUR_APP_SCORE, passage.score(), 1e-9);
+	}
+
+	@Test
+	void answersApaItuForATermThePdfWrappedMidWord() {
+		// "apa itu modekecocokan" -> single term "modekecocokan". The document holds it as the wrapped cell
+		// "MODEKECOCOK AN", which normalizes back to the term; the row has no copula, so the definition bonus
+		// stays out of it and the wrapped-term match alone selects the parameter's row and its explanation.
+		var context = reranker.select("apa itu modekecocokan", List.of(chunk(33L, PARAMETER_CHUNK, 0.48)));
+
+		assertEquals(1, context.getPassages().size());
+		var passage = context.getPassages().getFirst();
+		System.out.println("[apa itu modekecocokan] selected passage:\n" + passage.text());
+		assertTrue(passage.text().contains("MODEKECOCOK AN"), passage.text());
+		assertTrue(passage.text().contains("Parameter ini digunakan untuk menentukan mode atau metode"),
+				passage.text());
+		// Base wrapped-term match only; no copula follows the term, so no definition bonus is added.
+		assertEquals(2.0 + 0.48, passage.score(), 1e-9);
+	}
+
+	/**
+	 * The parameter table as the OCR-based extractor emits it: one GFM row per line, each carrying the whole
+	 * record. The matched row must be returned on its own — the row above it is a different parameter
+	 * (PARAM_TARGET_FASILITAS) that the model otherwise conflates into the answer.
+	 */
+	private static final String GFM_PARAMETER_CHUNK = """
+			No | TX | Code | Penjelasan
+			7 | PARAM_TARGE T_FASILITAS | • ALL • ACTIVE • CLOSED | Parameter ini digunakan untuk menentukan target fasilitas yang akan digunakan atau diproses dalam IDEB.
+			8 | MODEKECOCOK AN | • SIMILARITY • EXACT | Parameter ini digunakan untuk menentukan mode atau metode pencocokan data dalam proses IDEB.
+			9 | CUSTOMERTYP ECOMPANY | • PMG • PEM | Parameter ini digunakan untuk mengelola data jenis nasabah berbentuk badan usaha.
+			""";
+
+	@Test
+	void prefersTheRowMatchingTheSpecificTermOverAHeaderMatchingAGenericColumnWord() {
+		// "apa saja code dari MODEKECOCOKAN" -> terms [code, modekecocokan]. The header row matches the
+		// generic "code" and the data row matches "modekecocokan"; both tie on score (same single-term match
+		// + same chunk cosine). The specific subject term must win, or the model is handed only the header.
+		var passage = reranker.select("apa saja code dari MODEKECOCOKAN",
+				List.of(chunk(180L, GFM_PARAMETER_CHUNK, 0.47))).getPassages().getFirst();
+
+		System.out.println("[code modekecocokan] selected passage:\n" + passage.text());
+		assertTrue(passage.text().contains("MODEKECOCOK AN"), passage.text());
+		assertTrue(passage.text().contains("SIMILARITY"), passage.text());
+		assertTrue(passage.text().contains("EXACT"), passage.text());
+		// Not the bare header row, which carries no codes.
+		assertFalse(passage.text().equals("No | TX | Code | Penjelasan"), passage.text());
+	}
+
+	@Test
+	void returnsASingleGfmRowWithoutItsNeighbouringParameterRows() {
+		var passage = reranker.select("coba jelaskan apa yang dimaksud dengan MODEKECOCOKAN",
+				List.of(chunk(180L, GFM_PARAMETER_CHUNK, 0.45))).getPassages().getFirst();
+
+		System.out.println("[gfm modekecocokan] selected passage:\n" + passage.text());
+		// The matched row, whole and on its own line.
+		assertFalse(passage.text().contains("\n"), passage.text());
+		assertTrue(passage.text().contains("MODEKECOCOK AN"), passage.text());
+		assertTrue(passage.text().contains("menentukan mode atau metode pencocokan data"), passage.text());
+		// The neighbouring parameter rows must not leak in as distractors.
+		assertFalse(passage.text().contains("PARAM_TARGE"), passage.text());
+		assertFalse(passage.text().contains("target fasilitas"), passage.text());
+		assertFalse(passage.text().contains("CUSTOMERTYP"), passage.text());
+	}
+
+	@Test
+	void doesNotRewardAMereMentionThatIsNotADefinition() {
+		// Only the nav row is available: "cbas" still matches (2.0) so an answer is returned, but no copula
+		// follows the term, so the definition bonus must not fire.
+		var passage = reranker.select(WHAT_IS_CBAS_QUESTION, List.of(chunk(1L, NAV_CHUNK, NAV_SCORE)))
+				.getPassages().getFirst();
+
+		assertEquals(2.0 + NAV_SCORE, passage.score(), 1e-9);
 	}
 
 	private KnowledgeSearchResult chunk(Long chunkId, String content, double score) {

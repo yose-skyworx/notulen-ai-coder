@@ -20,6 +20,7 @@ public class KnowledgeProperties {
 	private Processing processing = new Processing();
 	private Upload upload = new Upload();
 	private Rag rag = new Rag();
+	private Expansion expansion = new Expansion();
 
 	@Setter
 	@Getter
@@ -92,5 +93,29 @@ public class KnowledgeProperties {
 		 * Diagnostic only; verbose. No extra LLM call.
 		 */
 		private boolean debugLog = false;
+	}
+
+	/**
+	 * Read-time context expansion, applied to retrieved chunks before they are reranked. Operates on
+	 * already-ingested chunks, so changing these values takes effect on the next question with no
+	 * re-ingest and no re-embedding.
+	 */
+	@Setter
+	@Getter
+	public static class Expansion {
+		/** Master switch. Turn off to compare answer quality with and without expansion. */
+		private boolean enabled = true;
+		/**
+		 * A hit shorter than this is treated as not self-contained and gets its sibling elements appended.
+		 * Mirrors {@code knowledge.chunk.min-tokens}: a chunk the chunker left below its own floor is the
+		 * one most likely to be missing the row that answers the question.
+		 */
+		private int expandBelowTokens = 150;
+		/**
+		 * Character ceiling for the sibling content appended to one hit. Deliberately separate from
+		 * {@code knowledge.rag.passage-budget-chars}, which bounds what reaches the model — this bounds
+		 * what the reranker is allowed to choose from.
+		 */
+		private int maxSiblingChars = 800;
 	}
 }

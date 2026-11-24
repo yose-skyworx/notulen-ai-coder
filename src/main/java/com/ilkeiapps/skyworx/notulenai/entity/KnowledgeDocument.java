@@ -3,6 +3,10 @@ package com.ilkeiapps.skyworx.notulenai.entity;
 import java.io.Serial;
 import java.io.Serializable;
 import java.time.Instant;
+import java.util.Map;
+
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -106,6 +110,17 @@ public class KnowledgeDocument implements Serializable {
 
 	@Column(name = "processing_error", length = 4096)
 	private String processingError;
+
+	/**
+	 * What the conversion service detected on the last run, verbatim: {@code format}, {@code page_count},
+	 * {@code sha256}, {@code ocr_pages}, {@code ocr_engine}, {@code ocr_langs}, {@code duration_ms}. Kept
+	 * as JSON rather than as columns because it is the converter's detection report, not data this
+	 * application filters or joins on — and the parts that do have a relational counterpart
+	 * ({@code filename}, {@code bytes}) already have their own columns above.
+	 */
+	@JdbcTypeCode(SqlTypes.JSON)
+	@Column(name = "conversion_metadata")
+	private Map<String, Object> conversionMetadata;
 
 	@ManyToOne(fetch = FetchType.LAZY)
 	@JoinColumn(name = "created_by_id")

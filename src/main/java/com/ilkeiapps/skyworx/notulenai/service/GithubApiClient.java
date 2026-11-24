@@ -216,6 +216,35 @@ public class GithubApiClient {
 	}
 
 	/**
+	 * The most recent commit that touched {@code path} at or before {@code ref}, for attributing a file to
+	 * who last changed it. One request: {@code /commits?sha={ref}&path={path}&per_page=1}, which GitHub
+	 * returns newest-first, so the single element is the latest commit on that path within the reviewed
+	 * snapshot. {@code ref} is the pinned head SHA rather than the branch head, so attribution matches the
+	 * exact commit the review covered.
+	 *
+	 * @return the latest commit touching the path, or empty when the path has no commit history at that ref
+	 */
+	public Optional<CommitInfo> lastCommitForPath(String owner, String repo, String ref, String path) {
+		var ownerPart = requireSlug(owner, "owner");
+		var repoPart = requireSlug(repo, "repo");
+		var sha = requireSha(ref);
+		var filePath = requirePath(path);
+		var label = "last commit " + ownerPart + "/" + repoPart + "@" + sha + ":" + filePath;
+
+		var query = new LinkedHashMap<String, String>();
+		query.put("sha", sha);
+		query.put("path", filePath);
+		query.put("per_page", "1");
+
+		var node = requireOk(label, getWithRetry(label,
+				builder -> buildUri(builder, "/repos/" + ownerPart + "/" + repoPart + "/commits", query)));
+		if (!node.isArray() || node.isEmpty()) {
+			return Optional.empty();
+		}
+		return Optional.ofNullable(parseCommit(node.get(0)));
+	}
+
+	/**
 	 * Reads one file at an exact commit. The SHA is mandatory: reading from the branch head instead
 	 * would review context that did not exist in the reviewed commit, which makes every line number in
 	 * the findings unverifiable.
@@ -546,6 +575,8 @@ public class GithubApiClient {
 		}
 		JsonNode commitNode = node.get("commit");
 		var message = commitNode == null ? null : textOrNull(commitNode, "message");
+		var authorName = commitNode == null ? null : textOrNull(commitNode.path("author"), "name");
+		var authorDate = commitNode == null ? null : parseInstant(textOrNull(commitNode.path("author"), "date"));
 		var committerName = commitNode == null ? null : textOrNull(commitNode.path("committer"), "name");
 		var committerDate = commitNode == null ? null : parseInstant(textOrNull(commitNode.path("committer"), "date"));
 
@@ -559,7 +590,7 @@ public class GithubApiClient {
 				}
 			}
 		}
-		return new CommitInfo(sha, message, committerName, committerDate, List.copyOf(parents));
+		return new CommitInfo(sha, message, authorName, authorDate, committerName, committerDate, List.copyOf(parents));
 	}
 
 	private static Instant parseInstant(String value) {
@@ -665,9 +696,13 @@ public class GithubApiClient {
 
 	// ------------------------------------------------------------------ result types
 
-	/** One commit as GitHub reports it. {@code parentShas} is empty for a root commit. */
-	public record CommitInfo(String sha, String message, String committerName, Instant committerDate,
-			List<String> parentShas) {
+	/**
+	 * One commit as GitHub reports it. {@code parentShas} is empty for a root commit. Author and committer
+	 * diverge for merges, squash-merges, rebases, and web-UI edits: the author is the person who wrote the
+	 * change, while the committer can be GitHub's web-flow identity.
+	 */
+	public record CommitInfo(String sha, String message, String authorName, Instant authorDate,
+			String committerName, Instant committerDate, List<String> parentShas) {
 	}
 
 	/**

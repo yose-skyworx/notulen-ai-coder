@@ -73,6 +73,19 @@ public class ReviewRoleResolver {
 		if (path == null) {
 			return null;
 		}
+		var role = resolveByPatterns(path);
+		// One line per path reporting the role it actually resolved to (null = not a target role). Debug,
+		// not info: this runs once per file in a whole-branch listing, which is the entire repository.
+		log.debug("review role (pattern): {} -> {}", path, role);
+		return role;
+	}
+
+	/**
+	 * The two pattern tiers, filename before directory, returning the first role that matches or null.
+	 * Separated from {@link #roleOfPath} so the resolved role can be logged in one place without a log
+	 * statement firing on every role the loop merely considered.
+	 */
+	private ReviewRoleType resolveByPatterns(String path) {
 		for (ReviewRoleType role : ReviewRoleType.values()) {
 			if (matchesAny(configFor(role).getFilenamePatterns(), path)) {
 				return role;

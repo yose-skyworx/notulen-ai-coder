@@ -1,5 +1,6 @@
 package com.ilkeiapps.skyworx.notulenai.service;
 
+import java.util.List;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -12,6 +13,7 @@ import org.springframework.web.client.RestClient;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ilkeiapps.skyworx.notulenai.bean.knowledge.ConvertedElement;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.TikaExtraction;
 import com.ilkeiapps.skyworx.notulenai.config.TikaProperties;
 
@@ -21,9 +23,10 @@ import lombok.extern.slf4j.Slf4j;
 /**
  * Document-conversion integration (the AnyDoc + PaddleOCR service behind {@code tika.server.url}).
  * Sends the document bytes as a multipart {@code POST /v1/convert} with {@code output=json}, which
- * returns {@code {"markdown": "...", "metadata": {...}}}: structure-preserving Markdown (ATX headings,
- * paragraphs, GFM tables, lists) plus what the service detected. The bytes are streamed to the service
- * rather than parsed in-process.
+ * returns {@code {"metadata": {...}, "elements": [...], "element_count": n, "schema_version": "1.0"}}:
+ * the document already split into ordered, typed elements (heading / paragraph / list / table), each
+ * carrying its heading path and parent linkage, plus what the service detected. The bytes are streamed
+ * to the service rather than parsed in-process.
  * <p>
  * The service identifies the format by sniffing the bytes, so no content type or file extension needs
  * to be supplied; an ambiguous format would need an extra {@code format} part, which nothing uploaded
@@ -66,20 +69,34 @@ public class TikaExtractionService {
 				.retrieve()
 				.body(String.class);
 
+		var extraction = parse(body);
+		log.info("convert: {} elements in {} ms, metadata={}", extraction.elements().size(),
+				System.currentTimeMillis() - start, extraction.metadata());
+		return extraction;
+	}
+
+	/** Package-private so the response binding is testable without a live conversion service. */
+	TikaExtraction parse(String body) {
 		var root = readTree(body);
-		if (!root.path("markdown").isTextual()) {
-			throw new IllegalStateException("Document conversion returned no markdown");
+		var elementsNode = root.path("elements");
+		if (!elementsNode.isArray()) {
+			throw new IllegalStateException("Document conversion returned no elements");
 		}
 
-		var content = root.path("markdown").asText();
 		var metadataNode = root.path("metadata");
 		Map<String, Object> metadata = metadataNode.isObject()
 				? OBJECT_MAPPER.convertValue(metadataNode, new TypeReference<Map<String, Object>>() {})
 				: Map.of();
 
-		log.info("convert: markdown length={} in {} ms, metadata={}", content.length(),
-				System.currentTimeMillis() - start, metadata);
-		return new TikaExtraction(content, metadata);
+		return new TikaExtraction(readElements(elementsNode), metadata);
+	}
+
+	private List<ConvertedElement> readElements(JsonNode elementsNode) {
+		try {
+			return OBJECT_MAPPER.convertValue(elementsNode, new TypeReference<List<ConvertedElement>>() {});
+		} catch (Exception e) {
+			throw new IllegalStateException("Unable to read the document conversion elements", e);
+		}
 	}
 
 	private JsonNode readTree(String body) {

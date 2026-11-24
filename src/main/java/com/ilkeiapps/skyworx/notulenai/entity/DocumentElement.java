@@ -27,10 +27,10 @@ import lombok.Setter;
 /**
  * The persistent class for the {@code document_elements} table: the normalized extraction output of a
  * {@link KnowledgeDocument}, preserving structure (heading hierarchy, parent/child, extraction order)
- * and provenance (page/slide numbers). Produced by the normalization layer from Apache Tika output.
+ * and provenance (page/slide numbers). Produced by the normalization layer from the conversion
+ * service's {@code elements} array.
  * <p>
- * {@code elementType} values: {@code DOCUMENT, HEADING, PARAGRAPH, TABLE, TABLE_ROW, LIST, IMAGE,
- * FOOTNOTE, OTHER}.
+ * {@code elementType} values: {@code DOCUMENT, HEADING, PARAGRAPH, LIST, TABLE, OTHER}.
  */
 @Entity
 @Table(name = "document_elements", indexes = {

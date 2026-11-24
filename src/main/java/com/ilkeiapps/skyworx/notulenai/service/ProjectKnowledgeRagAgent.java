@@ -27,7 +27,8 @@ import lombok.extern.slf4j.Slf4j;
  * only working chat model on the inference server, and measured against this corpus it answers correctly
  * from one short passage with one instruction, but degrades sharply with more: a few thousand tokens of
  * context, a second passage, a system prompt, or a structured-output schema each turn a correct answer
- * into a wrong or evasive one. So {@link PassageRerankerService} selects the passage, the prompt is plain
+ * into a wrong or evasive one. So {@link PassageRerankerService} selects the passage,
+ * {@link PassageFormatterService} rewrites it into a shape the model reads reliably, the prompt is plain
  * text with a single instruction and no system prompt, and {@code grounded} plus {@code citations} are
  * derived here rather than asked of the model — the model is never trusted with anything but the wording
  * of the answer, and a citation still always points at a chunk that was really retrieved.
@@ -40,7 +41,9 @@ import lombok.extern.slf4j.Slf4j;
  * before invoking it. {@code @Agent} is meta-annotated {@code @Component}, so this is a Spring bean;
  * Embabel's annotation scanning registers it with the platform at startup. Neither action is
  * {@code @Transactional}: retrieval embeds the query (remote) and the answer action calls the LLM
- * (remote), so no database transaction is held across either network call.
+ * (remote), so no database transaction is held across either network call. {@code retrieve} does open
+ * read-only transactions of its own, but only through {@link DocumentRetrievalService} and
+ * {@link ContextExpansionService}, each of which runs after the embedding call has already returned.
  */
 @Slf4j
 @Agent(
@@ -55,12 +58,15 @@ public class ProjectKnowledgeRagAgent {
 	private static final String NOT_GENERATED = "Jawaban tidak dapat dihasilkan dari basis pengetahuan proyek.";
 
 	private final DocumentRetrievalService retrievalService;
+	private final ContextExpansionService expansionService;
 	private final PassageRerankerService reranker;
+	private final PassageFormatterService formatter;
 	private final KnowledgeProperties properties;
 
 	@Action
 	public RetrievedChunks retrieve(RagQuery query) {
 		var results = retrievalService.retrieve(query.getProjectId(), query.getQuestion(), query.getTopK());
+		expansionService.enrich(query.getProjectId(), results);
 		log.info("rag.retrieve: project={} question='{}' -> {} chunk(s)", query.getProjectId(),
 				preview(query.getQuestion()), results.size());
 		return new RetrievedChunks(results);
@@ -120,13 +126,17 @@ public class ProjectKnowledgeRagAgent {
 	 * contain the answer. The one instruction deliberately does not constrain the length — asked for a single
 	 * sentence, the model answered a list-shaped question with the section intro that headed the list and
 	 * dropped every item in it, while the same passages answer correctly with the constraint removed.
+	 * <p>
+	 * The passages are handed to {@link PassageFormatterService} on the way in rather than emitted as the
+	 * reranker left them: a bare GFM row and a heading that never survived selection are both shapes this
+	 * model was measured to fail on, and both are fixable in the prompt without touching the selection.
 	 */
 	private String buildPrompt(String question, RerankedContext grounding) {
 		var asked = question.strip();
 		if (!asked.endsWith("?") && !asked.endsWith(".")) {
 			asked = asked + "?";
 		}
-		return grounding.toPromptContext()
+		return formatter.format(grounding).toPromptContext()
 				+ "\n\nBerdasarkan teks di atas, " + asked + " Jawab dalam Bahasa Indonesia.";
 	}
 

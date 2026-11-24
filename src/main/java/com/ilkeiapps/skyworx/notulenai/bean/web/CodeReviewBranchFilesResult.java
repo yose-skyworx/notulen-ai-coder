@@ -1,5 +1,6 @@
 package com.ilkeiapps.skyworx.notulenai.bean.web;
 
+import java.time.Instant;
 import java.util.List;
 
 import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
@@ -25,11 +26,26 @@ import com.ilkeiapps.skyworx.notulenai.bean.enums.ReviewRoleType;
  * @param headSha    the commit SHA the tree listing was pinned to
  * @param truncated  true when GitHub capped the listing, so the branch holds more than was seen
  * @param totalFiles the number of files the branch holds at {@code headSha}, reviewed and skipped alike
+ * @param author     the head commit's author — who wrote the change; null when GitHub reported none
+ * @param committer  the head commit's committer — who created the commit object; null when none
+ * @param reportText the generated Bahasa Indonesia report, or null when reporting is off or the model
+ *                   produced nothing; populated after the deterministic review, so null at save time
  * @param findings   every PMD violation found across the reviewed files, in file-then-rule order; empty
  *                   when nothing fired
  */
 public record CodeReviewBranchFilesResult(String repository, String branchName, String headSha,
-		boolean truncated, int totalFiles, List<BranchFinding> findings) {
+		boolean truncated, int totalFiles, String author, String committer, String reportText,
+		List<BranchFinding> findings) {
+
+	/**
+	 * Returns a copy with the report text attached; every other field is unchanged. The report is produced
+	 * by a remote LLM call made after the review is assembled and persisted, so it is set on the result
+	 * returned to the caller rather than at construction.
+	 */
+	public CodeReviewBranchFilesResult withReportText(String reportText) {
+		return new CodeReviewBranchFilesResult(repository, branchName, headSha, truncated, totalFiles, author,
+				committer, reportText, findings);
+	}
 
 	/**
 	 * One reviewed file and the role it was classified as.
@@ -53,8 +69,14 @@ public record CodeReviewBranchFilesResult(String repository, String branchName, 
 	 * @param priority  PMD priority, 1 (most severe) to 5
 	 * @param evidence  the trimmed source line(s) around {@code beginLine} in the snapshot, with the
 	 *                  annotations above it, so the finding shows the offending code without opening the file
+	 * @param author        the author of the latest commit that touched {@code path} at the reviewed head —
+	 *                      who last changed the file; falls back to the head commit's author on lookup failure
+	 * @param committer     the committer of that same commit; falls back to the head commit's committer
+	 * @param authorDate    when that change was written (author date); falls back to the head commit's
+	 * @param committerDate when that commit object was created (committer date); falls back to the head commit's
 	 */
 	public record BranchFinding(String path, String ruleName, String code, String message, int beginLine,
-			int endLine, int priority, String evidence) {
+			int endLine, int priority, String evidence, String author, String committer, Instant authorDate,
+			Instant committerDate) {
 	}
 }

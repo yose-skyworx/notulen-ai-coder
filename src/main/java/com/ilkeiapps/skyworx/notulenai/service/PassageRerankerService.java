@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.KnowledgeSearchResult;
 import com.ilkeiapps.skyworx.notulenai.bean.knowledge.RerankedContext;
 import com.ilkeiapps.skyworx.notulenai.config.KnowledgeProperties;
+import com.ilkeiapps.skyworx.notulenai.utility.QueryTerms;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -55,21 +56,32 @@ public class PassageRerankerService {
 	 */
 	private static final double PHRASE_BONUS = 3.0;
 
-	/** Punctuation that closes a sentence, used to tell a whole sentence from a wrapped fragment. */
-	private static final String SENTENCE_END = ".?!";
+	/**
+	 * Added when a query term is <em>defined</em> on the line — {@code X adalah …}, {@code X merupakan …},
+	 * {@code X (expansion) merupakan …} — which is the shape of the answer to an "apa itu X" question. A
+	 * single-term query like {@code apa itu cbas} leaves every line that merely mentions the term tied at
+	 * the base score, so without this bonus the tie is broken by cosine alone, and a short keyword-dense
+	 * navigation row ({@code Rekap CBAS}) outranks the prose sentence that actually defines the term. Sized
+	 * at {@link #PHRASE_BONUS} and added on top of the base match, so it clears any realistic cosine gap
+	 * (cosine lies in [0,1]) without ever promoting a line that does not contain the term.
+	 */
+	private static final double DEFINITION_BONUS = 3.0;
 
 	/**
-	 * Indonesian function words, question words, and request verbs. Filtered out so they cannot dominate
-	 * the ranking — {@code yang} and {@code jelaskan} appear in most questions and in most documents.
-	 * Deliberately excludes domain words ({@code data}, {@code proses}, {@code mode}, …), which are exactly
-	 * the terms worth matching on.
+	 * How far after the matched term to look for a copula. Wide enough to clear a parenthetical expansion
+	 * such as {@code CBAS (Credit Bureau Automation System) merupakan …} before the copula appears.
 	 */
-	private static final Set<String> STOPWORDS = Set.of(
-			"ada", "adalah", "agar", "apa", "apakah", "artinya", "atau", "bagaimana", "bahwa", "baik",
-			"berikan", "berikut", "bisa", "coba", "dalam", "dan", "dari", "di", "dimana", "dimaksud",
-			"dengan", "harus", "ini", "itu", "jadi", "jelaskan", "jelasin", "karena", "ke", "kemudian",
-			"lalu", "mana", "mohon", "pada", "pula", "saja", "saya", "secara", "sehingga", "sebutkan",
-			"supaya", "tersebut", "tidak", "tolong", "tunjukkan", "untuk", "yakni", "yaitu", "yang");
+	private static final int DEFINITION_SCAN_CHARS = 64;
+
+	/**
+	 * Indonesian definitional copulas. A query term immediately followed by one of these is being defined,
+	 * not merely mentioned. These are also stopwords (removed from the query), so they never appear as
+	 * query terms themselves; here they are matched in the document line, not the question.
+	 */
+	private static final Set<String> COPULAS = Set.of("adalah", "merupakan", "ialah", "yaitu", "yakni");
+
+	/** Punctuation that closes a sentence, used to tell a whole sentence from a wrapped fragment. */
+	private static final String SENTENCE_END = ".?!";
 
 	private final KnowledgeProperties properties;
 
@@ -84,7 +96,7 @@ public class PassageRerankerService {
 	 * @return the selected passages, never null
 	 */
 	public RerankedContext select(String question, List<KnowledgeSearchResult> results) {
-		var terms = queryTerms(question);
+		var terms = QueryTerms.significant(question);
 		if (terms.isEmpty() || results == null || results.isEmpty()) {
 			log.info("rerank: nothing to match (terms={}, chunks={})", terms, results == null ? 0 : results.size());
 			return RerankedContext.empty();
@@ -101,12 +113,15 @@ public class PassageRerankerService {
 			var chunk = results.get(i);
 			var lines = lines(chunk.getContent());
 			for (var matched = 0; matched < lines.size(); matched++) {
-				var lexical = scoreLine(normalize(lines.get(matched)), terms);
+				var raw = lines.get(matched);
+				var normalized = normalize(raw);
+				var lexical = scoreLine(normalized, terms) + definitionBonus(raw, terms);
 				if (lexical < minScore) {
 					continue;
 				}
 				var vector = chunk.getScore() != null ? chunk.getScore() : 0.0;
-				candidates.add(new Candidate(i + 1, chunk, passage(lines, matched, window, budget), lexical + vector));
+				candidates.add(new Candidate(i + 1, chunk, passage(lines, matched, window, budget),
+						lexical + vector, longestMatchedTerm(normalized, terms)));
 			}
 		}
 
@@ -115,7 +130,13 @@ public class PassageRerankerService {
 			return RerankedContext.empty();
 		}
 
-		candidates.sort((a, b) -> Double.compare(b.score(), a.score()));
+		// Primary: combined score. Tiebreak: the line matching the more specific (longer) query term wins —
+		// when "apa saja code dari MODEKECOCOKAN" ties a header holding the generic column word "code" against
+		// the data row holding "modekecocokan", the subject term the question is really about decides it.
+		candidates.sort((a, b) -> {
+			var byScore = Double.compare(b.score(), a.score());
+			return byScore != 0 ? byScore : Integer.compare(b.tieBreak(), a.tieBreak());
+		});
 
 		var passages = new ArrayList<RerankedContext.Passage>(maxPassages);
 		var usedSources = new LinkedHashSet<Integer>();
@@ -134,21 +155,6 @@ public class PassageRerankerService {
 				candidates.size(), passages.size(), passages.getFirst().sourceNumber(), passages.getFirst().score(),
 				passages.getFirst().text().length());
 		return new RerankedContext(passages);
-	}
-
-	/** Lowercased alphanumeric query terms of 4+ characters that are not stopwords, deduplicated in order. */
-	private List<String> queryTerms(String question) {
-		var terms = new ArrayList<String>();
-		if (question == null) {
-			return terms;
-		}
-		for (var raw : NON_ALPHANUMERIC.split(question.toLowerCase(Locale.ROOT))) {
-			if (raw.length() < 4 || STOPWORDS.contains(raw) || terms.contains(raw)) {
-				continue;
-			}
-			terms.add(raw);
-		}
-		return terms;
 	}
 
 	/** Non-blank lines of a chunk, trimmed. Blank lines are dropped so a window never wastes budget on them. */
@@ -195,6 +201,25 @@ public class PassageRerankerService {
 		return score;
 	}
 
+	/**
+	 * Length of the longest query term the line matches, by the same rules {@link #scoreLine} scores on
+	 * (whole term, wrapped fragment, or shared prefix). Used only as a tiebreaker, so a line matching a
+	 * long, specific term ({@code modekecocokan}) outranks one matching only a short, generic term
+	 * ({@code code}) when their scores are otherwise equal. Zero when nothing matches.
+	 */
+	private int longestMatchedTerm(String normalizedLine, List<String> terms) {
+		var longest = 0;
+		for (var term : terms) {
+			var matches = normalizedLine.contains(term)
+					|| (normalizedLine.length() >= MIN_PREFIX && term.contains(normalizedLine))
+					|| sharesPrefix(normalizedLine, term);
+			if (matches) {
+				longest = Math.max(longest, term.length());
+			}
+		}
+		return longest;
+	}
+
 	private boolean sharesPrefix(String normalizedLine, String term) {
 		for (var length = term.length() - 1; length >= MIN_PREFIX; length--) {
 			if (normalizedLine.contains(term.substring(0, length))) {
@@ -202,6 +227,32 @@ public class PassageRerankerService {
 			}
 		}
 		return false;
+	}
+
+	/**
+	 * {@link #DEFINITION_BONUS} when the line defines one of the query terms — the term followed, within
+	 * {@link #DEFINITION_SCAN_CHARS}, by a {@linkplain #COPULAS copula}. Scored on the raw line (not the
+	 * stripped form) so word boundaries survive: {@code cbas} in {@code CBAS (Credit Bureau Automation
+	 * System) merupakan aplikasi …} reaches {@code merupakan} across the parenthetical, while {@code Rekap
+	 * CBAS |} has no copula after the term and earns nothing. Awarded once per line — a line defines a thing
+	 * once.
+	 */
+	private double definitionBonus(String line, List<String> terms) {
+		var lower = line.toLowerCase(Locale.ROOT);
+		for (var term : terms) {
+			var at = lower.indexOf(term);
+			if (at < 0) {
+				continue;
+			}
+			var from = at + term.length();
+			var window = lower.substring(from, Math.min(lower.length(), from + DEFINITION_SCAN_CHARS));
+			for (var token : NON_ALPHANUMERIC.split(window)) {
+				if (COPULAS.contains(token)) {
+					return DEFINITION_BONUS;
+				}
+			}
+		}
+		return 0.0;
 	}
 
 	/**
@@ -214,6 +265,12 @@ public class PassageRerankerService {
 	 * under it, or the answer itself, whose neighbours are unrelated prose; appending unrelated prose hands
 	 * the model a distractor, which it answers from in preference to the sentence that matched. So a
 	 * sentence keeps only the fragments around it and stops at the next prose sentence.
+	 * <p>
+	 * A GFM table row is the exception: the OCR-based extractor emits one row per line with its cells
+	 * joined by {@code " | "}, so a single line already carries the whole record — a parameter's name, its
+	 * allowed values and its explanation. Its neighbouring rows are <em>different</em> records, and
+	 * appending them hands the model a parameter it did not ask about (it then answers about the wrong one).
+	 * So a complete pipe-delimited row is returned on its own, with no neighbours.
 	 */
 	private String passage(List<String> lines, int matched, int window, int budget) {
 		var head = lines.get(matched);
@@ -221,6 +278,9 @@ public class PassageRerankerService {
 			return head.substring(0, budget);
 		}
 		var wholeSentence = isSentence(head);
+		if (!wholeSentence && head.indexOf('|') >= 0) {
+			return head;
+		}
 		var sb = new StringBuilder(head);
 		var last = Math.min(lines.size() - 1, matched + window);
 		for (var i = matched + 1; i <= last; i++) {
@@ -258,7 +318,12 @@ public class PassageRerankerService {
 		return NON_ALPHANUMERIC.matcher(text.toLowerCase(Locale.ROOT)).replaceAll("");
 	}
 
-	/** A passage candidate before ranking: which chunk it came from, its text, and its combined score. */
-	private record Candidate(int sourceNumber, KnowledgeSearchResult chunk, String text, double score) {
+	/**
+	 * A passage candidate before ranking: which chunk it came from, its text, its combined score, and
+	 * {@code tieBreak} — the length of the longest query term the line matched, used to settle an exact
+	 * score tie in favour of the more specific term.
+	 */
+	private record Candidate(int sourceNumber, KnowledgeSearchResult chunk, String text, double score,
+			int tieBreak) {
 	}
 }

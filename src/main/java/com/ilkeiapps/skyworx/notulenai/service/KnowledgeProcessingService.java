@@ -5,9 +5,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.blazebit.persistence.CriteriaBuilderFactory;
@@ -23,14 +23,13 @@ import com.ilkeiapps.skyworx.notulenai.entity.KnowledgeDocument;
 import com.ilkeiapps.skyworx.notulenai.entity.QDocumentProcessingJob;
 import com.ilkeiapps.skyworx.notulenai.utility.Utility;
 
-import jakarta.annotation.PostConstruct;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Full document-processing pipeline: download → conversion to Markdown → normalization → persist
- * {@code DocumentElement}s → structure-aware chunking → BGE-M3 embeddings → persist
+ * Full document-processing pipeline: download → conversion to structured elements → normalization →
+ * persist {@code DocumentElement}s → structure-aware chunking → BGE-M3 embeddings → persist
  * {@code DocumentChunk} (+ pgvector embedding) + {@code DocumentChunkElement}. On success the document
  * and job become {@code COMPLETED} and the document becomes the current version; on failure both move
  * to {@code FAILED} with the error recorded.
@@ -59,14 +58,7 @@ public class KnowledgeProcessingService {
 	private final DocumentChunkingService chunkingService;
 	private final EmbeddingService embeddingService;
 	private final KnowledgeProperties properties;
-	private final PlatformTransactionManager transactionManager;
-
-	private TransactionTemplate tx;
-
-	@PostConstruct
-	void init() {
-		this.tx = new TransactionTemplate(transactionManager);
-	}
+	private final TransactionTemplate tx;
 
 	/** Context captured in the opening transaction, used by the (non-transactional) remote steps. */
 	private record DocContext(String objectKey, String contentType, String title) {
@@ -97,10 +89,12 @@ public class KnowledgeProcessingService {
 			log.info("process document {}: downloaded {} bytes (contentType={})", documentId, data.length, ctx.contentType());
 
 			var extraction = tikaExtractionService.extract(data);
-			log.info("process document {}: conversion returned markdown length={}", documentId,
-					extraction.content() == null ? 0 : extraction.content().length());
+			log.info("process document {}: conversion returned {} element(s)", documentId,
+					extraction.elements().size());
 
-			var normalized = normalizationService.normalize(extraction.content(), ctx.title());
+			tx.executeWithoutResult(status -> persistConversionMetadata(documentId, extraction.metadata()));
+
+			var normalized = normalizationService.normalize(extraction, ctx.title());
 			log.info("process document {}: normalized into {} elements", documentId, normalized.size());
 
 			tx.executeWithoutResult(status -> persistElements(documentId, normalized));
@@ -167,6 +161,18 @@ public class KnowledgeProcessingService {
 		document.setUpdatedAt(now);
 		this.em.flush();
 		return new DocContext(document.getStorageObjectKey(), document.getContentType(), document.getDocumentTitle());
+	}
+
+	/**
+	 * Records the converter's detection report on the document in its own committed transaction, before
+	 * normalization and embedding run, so a later failure still leaves behind what the service saw
+	 * (page count, OCR pages, duration) for diagnosis.
+	 */
+	private void persistConversionMetadata(Long documentId, Map<String, Object> conversionMetadata) {
+		var document = this.em.find(KnowledgeDocument.class, documentId);
+		document.setConversionMetadata(conversionMetadata);
+		document.setUpdatedAt(Instant.now());
+		this.em.flush();
 	}
 
 	private void persistElements(Long documentId, List<NormalizedElement> normalized) {

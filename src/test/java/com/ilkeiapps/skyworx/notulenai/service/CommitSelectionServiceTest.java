@@ -53,7 +53,8 @@ class CommitSelectionServiceTest {
 	}
 
 	private static CommitInfo commit(String sha, Instant committerDate, String... parents) {
-		return new CommitInfo(sha, "message for " + sha, "Committer", committerDate, List.of(parents));
+		return new CommitInfo(sha, "message for " + sha, "Author", committerDate, "Committer", committerDate,
+				List.of(parents));
 	}
 
 	private Optional<CommitSelectionService.Selection> select() {

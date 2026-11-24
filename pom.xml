@@ -43,6 +43,8 @@
         <springdoc.version>3.2.0</springdoc.version>
         <!-- MinIO Java SDK is not managed by any imported BOM; pin explicitly. -->
         <minio.version>8.5.17</minio.version>
+        <!-- PMD is not managed by any imported BOM; pin explicitly. -->
+        <pmd.version>7.29.0</pmd.version>
     </properties>
     <dependencies>
         <dependency>
@@ -70,10 +72,26 @@
         </dependency>
 
         <!-- Hibernate pgvector support: maps float[] to a PostgreSQL vector(N) column via
-             @JdbcTypeCode(SqlTypes.VECTOR). Version managed by the Spring Boot BOM. -->
+             @JdbcTypeCode(SqlTypesVECTOR). Version managed by the Spring Boot BOM. -->
         <dependency>
             <groupId>org.hibernate.orm</groupId>
             <artifactId>hibernate-vector</artifactId>
+        </dependency>
+
+        <!-- PMD: deterministic static analysis of the code-review module's PMD-mechanism rules.
+             No JDK or Spring capability covers this — the pipeline only ever holds source text fetched
+             from GitHub into memory, so bytecode-based analysers (SpotBugs, Error Prone, ArchUnit) have
+             nothing to read and would need a build this service never performs. pmd-core is declared
+             alongside pmd-java because its API is used directly rather than relied on transitively. -->
+        <dependency>
+            <groupId>net.sourceforge.pmd</groupId>
+            <artifactId>pmd-core</artifactId>
+            <version>${pmd.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>net.sourceforge.pmd</groupId>
+            <artifactId>pmd-java</artifactId>
+            <version>${pmd.version}</version>
         </dependency>
 
         <!-- MinIO object storage for original uploaded documents. -->

@@ -96,6 +96,14 @@ public class CodeReviewRun implements Serializable {
 	@Column(name = "commit_message", length = 2048)
 	private String commitMessage;
 
+	/** Author — who wrote the change. Survives merges/squash/web edits where the committer becomes GitHub. */
+	@Column(name = "author", length = 255)
+	private String author;
+
+	/** Author date — when the change was written, as opposed to when the commit object was created. */
+	@Column(name = "author_date")
+	private Instant authorDate;
+
 	@Column(name = "committer", length = 255)
 	private String committer;
 

@@ -29,6 +29,10 @@ public interface CodeReviewRunListView {
 
 	String getCommitMessage();
 
+	String getAuthor();
+
+	Instant getAuthorDate();
+
 	String getCommitter();
 
 	Instant getCommitDate();

@@ -54,7 +54,7 @@ public interface CodeReviewRunFileListView {
 	StatusView getStatus();
 
 	/**
-	 * The guideline version this file was reviewed against. Identity and title only — {@code content} is
+	 * The guideline rule this file was reviewed against. Identity and title only — {@code content} is
 	 * deliberately absent, because it runs to thousands of characters and this view is returned once per
 	 * file in a run. A caller that wants the wording asks for the guideline by id.
 	 */
@@ -65,7 +65,7 @@ public interface CodeReviewRunFileListView {
 
 		ReviewRoleType getRoleType();
 
-		Integer getVersion();
+		String getCode();
 
 		String getTitle();
 	}
